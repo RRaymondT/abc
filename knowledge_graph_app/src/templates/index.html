@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knowledge Graph Visualizer</title>
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <link href="https://unpkg.com/vis-network/styles/vis-network.min.css" rel="stylesheet" type="text/css" />
+    <style type="text/css">
+        body, html {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden; /* Prevent scrollbars from appearing due to border */
+        }
+        #mynetwork {
+            width: 100%;
+            height: 98vh; /* Slightly less than 100 to prevent scroll issues with border */
+            border: 1px solid lightgray;
+            box-sizing: border-box; /* Include border in width/height calculation */
+        }
+    </style>
+</head>
+<body>
+    <div id="mynetwork"></div>
+
+    <script type="text/javascript">
+        const container = document.getElementById('mynetwork');
+
+        const options = {
+            nodes: {
+                shape: 'dot', // Default shape
+                size: 16,
+                font: {
+                    size: 14,
+                    color: '#333'
+                },
+                borderWidth: 2,
+                shadow: true,
+            },
+            edges: {
+                width: 2,
+                shadow: true,
+                color: {
+                    color: '#848484',
+                    highlight: '#848484',
+                    hover: '#848484',
+                    inherit: 'from', // Edge color inherits from source node
+                    opacity: 1.0
+                },
+                arrows: {
+                    to: { enabled: true, scaleFactor: 1, type: 'arrow' }
+                },
+                font: {
+                    size: 12,
+                    align: 'middle', // Puts label in the middle of the edge
+                    strokeWidth: 3, // Background for text readability
+                    strokeColor: 'rgba(255,255,255,0.7)'
+                }
+            },
+            physics: {
+                enabled: true,
+                barnesHut: {
+                    gravitationalConstant: -2000,
+                    centralGravity: 0.3,
+                    springLength: 95,
+                    springConstant: 0.04,
+                    damping: 0.09,
+                    avoidOverlap: 0.1 // Higher value helps avoid overlap more
+                },
+                maxVelocity: 50,
+                minVelocity: 0.1,
+                solver: 'barnesHut', // 'repulsion', 'forceAtlas2Based' are other options
+                stabilization: {
+                    enabled: true,
+                    iterations: 1000, // More iterations for better stability
+                    updateInterval: 50,
+                    onlyDynamicEdges: false,
+                    fit: true
+                },
+                adaptiveTimestep: true
+            },
+            interaction: {
+                hover: true,
+                tooltipDelay: 200,
+                navigationButtons: true, // Show navigation buttons (zoom, fit)
+                keyboard: {
+                    enabled: true // Enable keyboard shortcuts
+                },
+                dragNodes: true, // Allow dragging nodes
+                dragView: true, // Allow dragging the view/canvas
+                zoomView: true // Allow zooming
+            },
+            layout: {
+                hierarchical: false // Set to true for hierarchical layout if appropriate for your data
+            },
+            groups: { // Example groups - you can define more based on 'type' attribute
+                python_file: { color: { background: '#FFD700', border: '#FFA500' }, shape: 'box' },
+                class: { color: { background: '#ADD8E6', border: '#87CEEB' }, shape: 'ellipse' },
+                method: { color: { background: '#90EE90', border: '#3CB371' }, shape: 'diamond' },
+                function: { color: { background: '#90EE90', border: '#3CB371' }, shape: 'triangle' },
+                module: { color: { background: '#D3D3D3', border: '#A9A9A9' }, shape: 'hexagon' },
+                bpmn_file: { color: { background: '#E6E6FA', border: '#D8BFD8'}, shape: 'box' },
+                bpmn_process: { color: { background: '#FFC0CB', border: '#FFB6C1'}, shape: 'star' },
+                bpmn_service_task: { color: { background: '#F08080', border: '#CD5C5C'}, shape: 'triangleDown' },
+                // Add more groups as needed for other node types
+                unknown: { color: { background: '#E0E0E0', border: '#C0C0C0' } },
+                inferred_entity: { color: { background: '#FFE4B5', border: '#FFDAB9', shape:'database' } },
+                technology_reference: { color: { background: '#40E0D0', border: '#00CED1'}, shape:'star', size: 20},
+                project_file: { color: { background: '#FAFAD2', border: '#FFFFE0'}, shape:'square', icon: { code: '\uf15b', color: '#2B7CE9' } }, // Example: file icon
+                codebase: { color: { background: '#A52A2A', border: '#800000' }, shape:'circle', size: 25 }
+            }
+        };
+
+        console.log("Fetching graph data...");
+        fetch('/graph_data')
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log("Graph data received:", data);
+                if (data.error) {
+                    console.error("Error loading graph data from server:", data.error);
+                    alert('Error loading graph data: ' + data.error);
+                    return;
+                }
+                if (!data.nodes || !data.edges) {
+                    console.error("Graph data is malformed:", data);
+                    alert('Graph data is malformed. Check console.');
+                    return;
+                }
+
+                const nodes = new vis.DataSet(data.nodes);
+                const edges = new vis.DataSet(data.edges);
+                const network_data = { nodes: nodes, edges: edges };
+                
+                console.log("Initializing vis.Network...");
+                const network = new vis.Network(container, network_data, options);
+                console.log("vis.Network initialized.");
+
+                network.on("stabilizationIterationsDone", function () {
+                    console.log("Graph stabilization complete. Fitting to view.");
+                    // network.fit(); // Fit the network to the view once stabilized
+                });
+
+                network.on("afterDrawing", function (ctx) {
+                    // Example: You could draw custom things on the canvas here
+                });
+                
+                network.on("showPopup", function (params) {
+                    // The 'title' attribute of nodes/edges (which we set to json.dumps of attrs) is used by default
+                    // For more complex tooltips, you might need to generate HTML content here
+                    const nodeId = params; // This is actually the node ID if it's a node popup
+                    // document.getElementById('tooltip-content').innerHTML = '<h2>Node: ' + nodeId + '</h2><p>Details...</p>';
+                    // This is just an example, default tooltip handling might be sufficient.
+                });
+
+
+            })
+            .catch(error => {
+                console.error('Error fetching or processing graph data:', error);
+                alert('Failed to load graph. Check console for details. Error: ' + error.message);
+            });
+    </script>
+</body>
+</html>
