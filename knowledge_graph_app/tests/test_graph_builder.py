@@ -269,6 +269,141 @@ class TestGraphBuilder(unittest.TestCase):
         self.assertTrue(g.has_node(req_txt_node_id))
         self.assertEqual(g.nodes[req_txt_node_id]['type'], 'project_file') # Type from tech_scan
 
+    def test_process_python_data_with_decorators(self):
+        """Test processing Python data that includes decorators."""
+        file_path = 'decorated_app.py'
+        mock_data = {
+            "file_path": file_path,
+            "classes": [{
+                "name": "DecoratedClass",
+                "decorators": ["@my_class_decorator"],
+                "methods": [{
+                    "name": "decorated_method",
+                    "decorators": ["@my_method_decorator(arg=True)"],
+                    "parameters": ["self"]
+                }]
+            }],
+            "functions": [{
+                "name": "decorated_function",
+                "decorators": ["@another_decorator"],
+                "parameters": []
+            }]
+        }
+        self.kg.process_parsed_file_data(mock_data)
+        g = self.kg.get_graph()
+
+        class_node_id = self.kg._generate_node_id("class", file_path, "DecoratedClass")
+        self.assertTrue(g.has_node(class_node_id))
+        self.assertEqual(g.nodes[class_node_id].get('decorators'), ["@my_class_decorator"])
+
+        method_node_id = self.kg._generate_node_id("method", file_path, "DecoratedClass", "decorated_method")
+        self.assertTrue(g.has_node(method_node_id))
+        self.assertEqual(g.nodes[method_node_id].get('decorators'), ["@my_method_decorator(arg=True)"])
+        
+        func_node_id = self.kg._generate_node_id("function", file_path, "decorated_function")
+        self.assertTrue(g.has_node(func_node_id))
+        self.assertEqual(g.nodes[func_node_id].get('decorators'), ["@another_decorator"])
+
+
+    def test_process_csharp_data_sample(self):
+        """Test processing of parsed C# data."""
+        file_path = '/app/services/ExampleService.cs'
+        mock_csharp_data = {
+            "file_path": file_path,
+            "usings": ["System", "System.Threading.Tasks"],
+            "namespaces": [{
+                "name": "MyCompany.Services",
+                "classes": [{
+                    "name": "ExampleService", "namespace": "MyCompany.Services", 
+                    "attributes": ["ServiceContract"], "base_types_str": "IExampleService",
+                    "methods": [{
+                        "name": "DoWorkAsync", "attributes": ["OperationContract"], 
+                        "return_type": "Task<string>", "parameters_str": "int id"
+                    }],
+                    "properties": [{
+                        "name": "IsEnabled", "attributes": [], "type": "bool"
+                    }]
+                }],
+                "interfaces": []
+            }],
+            "classes": [], "interfaces": []
+        }
+        self.kg.process_parsed_file_data(mock_csharp_data)
+        g = self.kg.get_graph()
+
+        file_node_id = self.kg._generate_node_id("file", file_path)
+        self.assertTrue(g.has_node(file_node_id))
+        self.assertEqual(g.nodes[file_node_id]['type'], 'csharp_file')
+
+        ns_node_id = self.kg._generate_node_id("csharp_namespace", "MyCompany.Services")
+        self.assertTrue(g.has_node(ns_node_id))
+        self.assertTrue(g.has_edge(file_node_id, ns_node_id))
+
+        class_node_id = self.kg._generate_node_id("csharp_class", file_path, "ExampleService")
+        self.assertTrue(g.has_node(class_node_id))
+        self.assertEqual(g.nodes[class_node_id]['namespace'], "MyCompany.Services")
+        self.assertIn("ServiceContract", g.nodes[class_node_id]['attributes'])
+        self.assertEqual(g.nodes[class_node_id]['base_types_str'], "IExampleService")
+        self.assertTrue(g.has_edge(ns_node_id, class_node_id)) # contains_entity
+        self.assertTrue(g.has_edge(file_node_id, class_node_id)) # defines_class
+
+        method_node_id = self.kg._generate_node_id("csharp_method", file_path, "ExampleService", "DoWorkAsync")
+        self.assertTrue(g.has_node(method_node_id))
+        self.assertIn("OperationContract", g.nodes[method_node_id]['attributes'])
+        self.assertEqual(g.nodes[method_node_id]['return_type'], "Task<string>")
+        self.assertTrue(g.has_edge(class_node_id, method_node_id))
+
+        prop_node_id = self.kg._generate_node_id("csharp_property", file_path, "ExampleService", "IsEnabled")
+        self.assertTrue(g.has_node(prop_node_id))
+        self.assertEqual(g.nodes[prop_node_id]['type'], "bool")
+        self.assertTrue(g.has_edge(class_node_id, prop_node_id))
+
+
+    def test_process_vue_data_sample(self):
+        """Test processing of parsed Vue.js SFC data."""
+        file_path = '/app/components/Login.vue'
+        mock_vue_data = {
+            "file_path": file_path,
+            "component_name": "LoginComponent",
+            "script_lang": "ts", "style_lang": "scss",
+            "imports": ["vue", "./apiService"],
+            "props": ["username", "password"],
+            "data_properties": ["email", "rememberMe"],
+            "methods": ["handleLogin", "resetForm"],
+            "computed_properties": ["isFormValid"],
+            "template_components_used": ["BaseInput", "AwesomeButton"],
+            "template_event_bindings": [{"event": "click", "handler": "handleLogin"}]
+        }
+        self.kg.process_parsed_file_data(mock_vue_data)
+        g = self.kg.get_graph()
+
+        file_node_id = self.kg._generate_node_id("file", file_path)
+        self.assertTrue(g.has_node(file_node_id))
+        self.assertEqual(g.nodes[file_node_id]['type'], 'vue_component_file')
+
+        comp_node_id = self.kg._generate_node_id("vue_component", file_path, "LoginComponent")
+        self.assertTrue(g.has_node(comp_node_id))
+        self.assertEqual(g.nodes[comp_node_id]['script_lang'], 'ts')
+        self.assertTrue(g.has_edge(file_node_id, comp_node_id)) # defines_component
+
+        # Check one of each type of sub-element
+        prop_node_id = self.kg._generate_node_id("vue_prop", file_path, "LoginComponent", "username")
+        self.assertTrue(g.has_node(prop_node_id))
+        self.assertTrue(g.has_edge(comp_node_id, prop_node_id)) # has_prop
+
+        method_node_id = self.kg._generate_node_id("vue_method", file_path, "LoginComponent", "handleLogin")
+        self.assertTrue(g.has_node(method_node_id))
+        self.assertTrue(g.has_edge(comp_node_id, method_node_id)) # has_method
+
+        # Check component usage
+        used_comp_node_id = self.kg._generate_node_id("vue_component", "BaseInput") # Simpler ID for used component
+        self.assertTrue(g.has_node(used_comp_node_id))
+        self.assertTrue(g.has_edge(comp_node_id, used_comp_node_id)) # uses_component_in_template
+        
+        # Check event binding leading to method
+        # The edge type is dynamic: f"on_{event_name.replace('.', '_')}_calls_method"
+        self.assertTrue(g.has_edge(comp_node_id, method_node_id, type="on_click_calls_method"))
+
 
 if __name__ == '__main__':
     unittest.main()

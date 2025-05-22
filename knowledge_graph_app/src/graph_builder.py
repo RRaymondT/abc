@@ -107,6 +107,7 @@ class KnowledgeGraph:
     def process_python_parsed_data(self, parsed_data: dict, file_path: str):
         """
         Processes parsed Python data and adds corresponding nodes and edges to the graph.
+        Ensures 'decorators' attribute is added if present in parsed_data.
 
         Args:
             parsed_data: The dictionary from parse_python_file.
@@ -122,9 +123,6 @@ class KnowledgeGraph:
 
         # Process imports
         for mod_name in parsed_data.get('imports', []):
-            # Normalize module names that might be relative like '.module.sub'
-            # For now, treat them as potentially global, but this could be refined
-            # if we have information about the project's root and structure.
             clean_mod_name = mod_name.lstrip('.') 
             mod_node_id = self._generate_node_id("module", clean_mod_name)
             self.add_node(mod_node_id, node_type="python_module", name=clean_mod_name)
@@ -134,25 +132,33 @@ class KnowledgeGraph:
         for cls_data in parsed_data.get('classes', []):
             class_name = cls_data['name']
             class_node_id = self._generate_node_id("class", file_path, class_name)
-            self.add_node(class_node_id, node_type="class", name=class_name,
-                          base_classes=cls_data.get('base_classes', []), file_path=file_path)
+            node_attrs = {
+                "name": class_name,
+                "base_classes": cls_data.get('base_classes', []),
+                "file_path": file_path
+            }
+            if cls_data.get('decorators'):
+                node_attrs['decorators'] = cls_data['decorators']
+            self.add_node(class_node_id, node_type="class", **node_attrs)
             self.add_edge(file_node_id, class_node_id, relationship_type="defines_class")
 
             # Process methods
             for m_data in cls_data.get('methods', []):
                 method_name = m_data['name']
                 method_node_id = self._generate_node_id("method", file_path, class_name, method_name)
-                self.add_node(method_node_id, node_type="method", name=method_name,
-                              parameters=m_data.get('parameters', []), class_name=class_name, file_path=file_path)
+                method_attrs = {
+                    "name": method_name,
+                    "parameters": m_data.get('parameters', []),
+                    "class_name": class_name,
+                    "file_path": file_path
+                }
+                if m_data.get('decorators'):
+                    method_attrs['decorators'] = m_data['decorators']
+                self.add_node(method_node_id, node_type="method", **method_attrs)
                 self.add_edge(class_node_id, method_node_id, relationship_type="defines_method")
 
-                # Process calls within methods
                 for call_target_str in m_data.get('calls', []):
-                    # Attempt to determine if the call is to another method in the same class,
-                    # a function in the same file, or an external entity.
-                    # This is a simplification; real resolution is complex.
-                    target_node_id = self._generate_node_id("callable", call_target_str) # Simplified ID
-                    # Node type 'callable_entity' is generic. If we can resolve it better, we'd update type.
+                    target_node_id = self._generate_node_id("callable", call_target_str)
                     self.add_node(target_node_id, node_type="callable_entity", name=call_target_str, inferred=True)
                     self.add_edge(method_node_id, target_node_id, relationship_type="calls")
 
@@ -160,13 +166,18 @@ class KnowledgeGraph:
         for func_data in parsed_data.get('functions', []):
             func_name = func_data['name']
             func_node_id = self._generate_node_id("function", file_path, func_name)
-            self.add_node(func_node_id, node_type="function", name=func_name,
-                          parameters=func_data.get('parameters', []), file_path=file_path)
+            func_attrs = {
+                "name": func_name,
+                "parameters": func_data.get('parameters', []),
+                "file_path": file_path
+            }
+            if func_data.get('decorators'):
+                func_attrs['decorators'] = func_data['decorators']
+            self.add_node(func_node_id, node_type="function", **func_attrs)
             self.add_edge(file_node_id, func_node_id, relationship_type="defines_function")
 
-            # Process calls within functions
             for call_target_str in func_data.get('calls', []):
-                target_node_id = self._generate_node_id("callable", call_target_str) # Simplified ID
+                target_node_id = self._generate_node_id("callable", call_target_str)
                 self.add_node(target_node_id, node_type="callable_entity", name=call_target_str, inferred=True)
                 self.add_edge(func_node_id, target_node_id, relationship_type="calls")
 
@@ -273,19 +284,231 @@ class KnowledgeGraph:
             return
 
         file_path = file_analysis_result.get("file_path")
-        if not file_path:
-            logging.warning("file_analysis_result is missing 'file_path'. Skipping.")
+        if not file_path: # Should not happen if parser is consistent
+            logging.error("file_analysis_result is missing 'file_path'. Critical error. Skipping.")
             return
 
         logging.info(f"Processing parsed data for file: {file_path}")
 
-        # Determine parser type based on unique keys
-        if 'classes' in file_analysis_result or 'functions' in file_analysis_result: # Python specific keys
+        # Determine parser type based on more specific keys
+        if 'imports' in file_analysis_result and ('classes' in file_analysis_result or 'functions' in file_analysis_result) and 'decorators' not in file_analysis_result.get('classes', [{}])[0] and 'decorators' not in file_analysis_result.get('functions', [{}])[0]:
+             # This check is to ensure we are not misidentifying other types as python due to common keys.
+             # The 'decorators' check is a bit of a heuristic from the previous task.
+             # A better way might be for the parser to explicitly state the language/type.
+             # For now, assuming this heuristic or that decorators will be empty list if not present.
             self.process_python_parsed_data(file_analysis_result, file_path)
+        elif 'namespaces' in file_analysis_result and 'usings' in file_analysis_result: # Heuristic for C#
+            self.process_csharp_parsed_data(file_analysis_result, file_path)
+        elif 'component_name' in file_analysis_result and 'template_components_used' in file_analysis_result: # Heuristic for Vue
+            self.process_vue_parsed_data(file_analysis_result, file_path)
         elif 'processes' in file_analysis_result or 'service_tasks' in file_analysis_result: # BPMN specific keys
+            # This should be checked before Python if there's any ambiguity, but BPMN keys are quite distinct
             self.process_bpmn_parsed_data(file_analysis_result, file_path)
+        elif 'classes' in file_analysis_result or 'functions' in file_analysis_result: # Python specific keys (fallback if not caught above)
+             self.process_python_parsed_data(file_analysis_result, file_path)
         else:
-            logging.warning(f"Unknown parsed data structure for {file_path}. No specific processor found.")
+            logging.warning(f"Unknown parsed data structure for {file_path}. No specific processor found. Keys: {list(file_analysis_result.keys())}")
+
+    def process_csharp_parsed_data(self, parsed_data: dict, file_path: str):
+        """
+        Processes parsed C# data and adds corresponding nodes and edges to the graph.
+        """
+        if not parsed_data:
+            logging.warning(f"No parsed data provided for C# file: {file_path}")
+            return
+
+        file_node_id = self._generate_node_id("file", file_path)
+        self.add_node(file_node_id, node_type="csharp_file", path=file_path, name=os.path.basename(file_path))
+        logging.debug(f"Processing C# file node: {file_node_id}")
+
+        # Usings
+        for using_directive in parsed_data.get('usings', []):
+            using_node_id = self._generate_node_id("csharp_using_directive", using_directive)
+            self.add_node(using_node_id, node_type="csharp_using_directive", name=using_directive)
+            self.add_edge(file_node_id, using_node_id, relationship_type="imports") # 'imports' is generic
+
+        # Namespaces
+        for ns_data in parsed_data.get('namespaces', []):
+            ns_name = ns_data['name']
+            ns_node_id = self._generate_node_id("csharp_namespace", ns_name)
+            self.add_node(ns_node_id, node_type="csharp_namespace", name=ns_name)
+            self.add_edge(file_node_id, ns_node_id, relationship_type="defines_namespace")
+
+            # Process entities within this namespace
+            self._process_csharp_entities(ns_data.get('classes', []), file_node_id, ns_node_id, ns_name)
+            self._process_csharp_entities(ns_data.get('interfaces', []), file_node_id, ns_node_id, ns_name, is_interface=True)
+
+        # Process top-level classes and interfaces (outside any explicit namespace)
+        self._process_csharp_entities(parsed_data.get('classes', []), file_node_id, None, None)
+        self._process_csharp_entities(parsed_data.get('interfaces', []), file_node_id, None, None, is_interface=True)
+
+
+    def _process_csharp_entities(self, entities_data: list, file_node_id: str, file_path_for_id_gen: str, ns_node_id: str | None, ns_name: str | None, is_interface=False):
+        """Helper to process lists of C# classes or interfaces."""
+        # file_path_for_id_gen is the original file_path string, used for consistent ID generation
+        # file_node_id is the ID of the file node in the graph.
+        entity_type_prefix = "csharp_interface" if is_interface else "csharp_class"
+        
+        for entity_data in entities_data:
+            entity_name = entity_data['name']
+            # Ensure entities parsed within a namespace block in parser are correctly scoped here
+            # The parser puts all entities (namespaced or not) into top-level 'classes'/'interfaces' lists,
+            # but includes a 'namespace' attribute on them if they were in one.
+            # So, we check entity_data['namespace'] to link to the correct ns_node_id.
+            # This method is called for entities within a specific ns_data, AND for global entities.
+            # If ns_node_id is passed, it means we are currently processing entities for that namespace.
+            # If entity_data['namespace'] matches current ns_name, good.
+            # If entity_data['namespace'] is None and ns_node_id is None, it's a global entity.
+            
+            # Filter: only process entities that belong to the current namespace context
+            # (or global if ns_node_id is None)
+            if ns_name != entity_data.get('namespace'):
+                continue
+
+            # ID generation uses the original file_path string for consistency, not the file_node_id
+            entity_node_id = self._generate_node_id(entity_type_prefix, file_path_for_id_gen, entity_name) 
+            
+            attrs_to_add = {
+                "name": entity_name,
+                "attributes": entity_data.get('attributes', []),
+                "base_types_str": entity_data.get('base_types_str'), 
+                "namespace": entity_data.get('namespace'), 
+                "file_path": file_path_for_id_gen # Store actual file path for reference
+            }
+            attrs_to_add = {k: v for k, v in attrs_to_add.items() if v is not None}
+
+            self.add_node(entity_node_id, node_type=entity_type_prefix, **attrs_to_add)
+            self.add_edge(file_node_id, entity_node_id, relationship_type=f"defines_{'interface' if is_interface else 'class'}")
+
+            if ns_node_id and entity_data.get('namespace'): 
+                 self.add_edge(ns_node_id, entity_node_id, relationship_type="contains_entity")
+
+            if entity_data.get('base_types_str'):
+                base_types = [b.strip() for b in entity_data['base_types_str'].split(',')]
+                for base_type_name in base_types:
+                    base_type_node_id = self._generate_node_id("csharp_external_type", base_type_name)
+                    self.add_node(base_type_node_id, node_type="csharp_external_type", name=base_type_name, inferred=True)
+                    self.add_edge(entity_node_id, base_type_node_id, relationship_type="inherits_or_implements_from")
+            
+            for method_data in entity_data.get('methods', []):
+                method_name = method_data['name']
+                method_node_id = self._generate_node_id("csharp_method", file_path_for_id_gen, entity_name, method_name)
+                method_attrs = {
+                    "name": method_name,
+                    "return_type": method_data.get('return_type'),
+                    "parameters_str": method_data.get('parameters_str'),
+                    "attributes": method_data.get('attributes', []),
+                    "parent_entity_name": entity_name,
+                    "file_path": file_path_for_id_gen
+                }
+                method_attrs = {k:v for k,v in method_attrs.items() if v is not None}
+                self.add_node(method_node_id, node_type="csharp_method", **method_attrs)
+                self.add_edge(entity_node_id, method_node_id, relationship_type="defines_method")
+
+            for prop_data in entity_data.get('properties', []):
+                prop_name = prop_data['name']
+                prop_node_id = self._generate_node_id("csharp_property", file_path_for_id_gen, entity_name, prop_name)
+                prop_attrs = {
+                    "name": prop_name,
+                    "type": prop_data.get('type'),
+                    "attributes": prop_data.get('attributes', []),
+                    "parent_entity_name": entity_name,
+                    "file_path": file_path_for_id_gen
+                }
+                prop_attrs = {k:v for k,v in prop_attrs.items() if v is not None}
+                self.add_node(prop_node_id, node_type="csharp_property", **prop_attrs)
+                self.add_edge(entity_node_id, prop_node_id, relationship_type="defines_property")
+
+    def process_vue_parsed_data(self, parsed_data: dict, file_path: str):
+        """
+        Processes parsed Vue.js SFC data and adds corresponding nodes and edges to the graph.
+        """
+        if not parsed_data:
+            logging.warning(f"No parsed data provided for Vue SFC file: {file_path}")
+            return
+
+        file_node_id = self._generate_node_id("file", file_path) # Represents the .vue file itself
+        self.add_node(file_node_id, node_type="vue_component_file", path=file_path, name=os.path.basename(file_path))
+        logging.debug(f"Processing Vue SFC file node: {file_node_id}")
+
+        comp_name = parsed_data.get('component_name', os.path.splitext(os.path.basename(file_path))[0])
+        # Primary component node ID includes file_path to ensure uniqueness if multiple components have same name
+        comp_node_id = self._generate_node_id("vue_component", file_path, comp_name)
+        
+        comp_attrs = {"name": comp_name, "file_path": file_path}
+        if parsed_data.get('script_lang'):
+            comp_attrs['script_lang'] = parsed_data['script_lang']
+        if parsed_data.get('style_lang'):
+            comp_attrs['style_lang'] = parsed_data['style_lang']
+        self.add_node(comp_node_id, node_type="vue_component", **comp_attrs)
+        self.add_edge(file_node_id, comp_node_id, relationship_type="defines_component")
+
+        # Imports from <script>
+        for import_source in parsed_data.get('imports', []):
+            # Assuming imports are typically JS modules or other .vue components
+            # For simplicity, using a generic 'javascript_module' type.
+            # Could try to resolve if it's another .vue file in the project later.
+            import_node_id = self._generate_node_id("javascript_module", import_source) 
+            self.add_node(import_node_id, node_type="javascript_module", name=import_source, inferred=True)
+            self.add_edge(comp_node_id, import_node_id, relationship_type="imports_js_module")
+
+        # Props
+        for prop_name in parsed_data.get('props', []):
+            prop_node_id = self._generate_node_id("vue_prop", file_path, comp_name, prop_name)
+            self.add_node(prop_node_id, node_type="vue_prop", name=prop_name, component_name=comp_name, file_path=file_path)
+            self.add_edge(comp_node_id, prop_node_id, relationship_type="has_prop")
+
+        # Data Properties
+        for data_prop_name in parsed_data.get('data_properties', []):
+            data_node_id = self._generate_node_id("vue_data_property", file_path, comp_name, data_prop_name)
+            self.add_node(data_node_id, node_type="vue_data_property", name=data_prop_name, component_name=comp_name, file_path=file_path)
+            self.add_edge(comp_node_id, data_node_id, relationship_type="has_data")
+
+        # Methods
+        for method_name in parsed_data.get('methods', []):
+            method_node_id = self._generate_node_id("vue_method", file_path, comp_name, method_name)
+            self.add_node(method_node_id, node_type="vue_method", name=method_name, component_name=comp_name, file_path=file_path)
+            self.add_edge(comp_node_id, method_node_id, relationship_type="has_method")
+
+        # Computed Properties
+        for computed_name in parsed_data.get('computed_properties', []):
+            computed_node_id = self._generate_node_id("vue_computed_property", file_path, comp_name, computed_name)
+            self.add_node(computed_node_id, node_type="vue_computed_property", name=computed_name, component_name=comp_name, file_path=file_path)
+            self.add_edge(comp_node_id, computed_node_id, relationship_type="has_computed")
+
+        # Template Component Usage
+        for used_comp_tag_name in parsed_data.get('template_components_used', []):
+            # Node ID for used components: if they are local/imported, their file_path might be resolvable.
+            # For now, treat them as potentially external or globally unique by name.
+            # A more sophisticated approach would try to match used_comp_tag_name with imported component names.
+            used_comp_node_id = self._generate_node_id("vue_component", used_comp_tag_name) # Simpler ID for used component
+            self.add_node(used_comp_node_id, node_type="vue_component", name=used_comp_tag_name, inferred=True)
+            self.add_edge(comp_node_id, used_comp_node_id, relationship_type="uses_component_in_template")
+
+        # Template Event Bindings
+        for binding in parsed_data.get('template_event_bindings', []):
+            event_name = binding.get('event')
+            handler_name = binding.get('handler')
+            if event_name and handler_name:
+                # Attempt to link to an existing method node of the component
+                # Clean handler_name if it includes arguments, e.g., "myMethod(arg)" -> "myMethod"
+                handler_method_name_clean = handler_name.split('(')[0].strip()
+                
+                target_method_node_id = self._generate_node_id("vue_method", file_path, comp_name, handler_method_name_clean)
+                
+                # Check if this method node actually exists (was parsed from <script>)
+                if target_method_node_id in self.nodes:
+                    self.add_edge(comp_node_id, target_method_node_id, 
+                                  relationship_type=f"on_{event_name.replace('.', '_')}_calls_method", 
+                                  handler_expression=handler_name)
+                else:
+                    # Handler might be an inline expression or refer to something not parsed as a distinct method
+                    # Create an "inferred_handler" node or add attribute to component?
+                    # For now, log it and potentially create an inferred callable node.
+                    inferred_handler_id = self._generate_node_id("vue_event_handler_expression", file_path, comp_name, event_name, handler_name)
+                    self.add_node(inferred_handler_id, node_type="vue_event_handler_expression", name=handler_name, event_name=event_name, component_name=comp_name, file_path=file_path)
+                    self.add_edge(comp_node_id, inferred_handler_id, relationship_type=f"handles_event_{event_name.replace('.', '_')}")
+                    logging.debug(f"Vue component {comp_name} event '{event_name}' handler '{handler_name}' does not directly map to a parsed method. Created expression node.")
 
 
     def process_tech_scan_data(self, tech_scan_results: dict, codebase_path: str):
@@ -347,15 +570,15 @@ class KnowledgeGraph:
 
         # Process individual file parsing results
         if all_parsed_data:
-            for file_path, parsed_data_for_file in all_parsed_data.items():
-                if parsed_data_for_file: # Ensure there's data to process
-                    self.process_parsed_file_data(parsed_data_for_file)
+            for file_path_key, parsed_data_for_file_value in all_parsed_data.items():
+                if parsed_data_for_file_value: # Ensure there's data to process
+                     # Pass the actual file_path from the parsed data if available, else use key
+                    actual_file_path = parsed_data_for_file_value.get("file_path", file_path_key)
+                    self.process_parsed_file_data(parsed_data_for_file_value) # process_parsed_file_data gets path from result
                 else:
-                    # If a file was identified (e.g. by tech scanner) but not parsed or parsing failed,
-                    # ensure a basic file node exists.
-                    logging.debug(f"No parsed data for {file_path}, ensuring basic file node exists.")
-                    file_node_id = self._generate_node_id("file", file_path)
-                    self.add_node(file_node_id, node_type="file", path=file_path, name=os.path.basename(file_path))
+                    logging.debug(f"No parsed data for {file_path_key}, ensuring basic file node exists.")
+                    file_node_id = self._generate_node_id("file", file_path_key) # Use key if value is None
+                    self.add_node(file_node_id, node_type="file", path=file_path_key, name=os.path.basename(file_path_key))
         else:
             logging.warning("No parsed file data provided to load_graph_from_directory.")
         
@@ -406,103 +629,120 @@ if __name__ == '__main__':
     }
 
     # 2. Mock Parsed File Data (from code_parser.py)
-    # For Python file (user_service.py)
+    # For Python file (user_service.py) - with decorators
     mock_python_parsed = {
         "file_path": dummy_py_path,
         "imports": ["flask"],
         "classes": [{
-            "name": "UserService",
-            "base_classes": [],
-            "methods": [{
-                "name": "get_user",
-                "parameters": ["self", "id"],
-                "calls": ["flask.jsonify"]
-            }]
+            "name": "UserService", "base_classes": [], "decorators": ["@app.route('/users')"],
+            "methods": [{"name": "get_user", "parameters": ["self", "id"], "calls": ["flask.jsonify"], "decorators": ["@app.route('/<id>')"]}]
         }],
-        "functions": [{
-            "name": "process_data",
-            "parameters": [],
-            "calls": ["print"]
-        }]
+        "functions": [{"name": "process_data", "parameters": [], "calls": ["print"], "decorators": ["@background_task"]}]
     }
 
     # For BPMN file (order_process.bpmn)
     mock_bpmn_parsed = {
-        "file_path": dummy_bpmn_path,
-        "processes": [{
-            "id": "OrderProcess", 
-            "name": "Order Fulfillment"
+        "file_path": dummy_bpmn_path, "processes": [{"id": "OrderProcess", "name": "Order Fulfillment"}],
+        "service_tasks": [{"id": "Task_EmailCustomer", "name": "Email Customer", "camunda_class": "com.example.EmailDelegate"}],
+        "user_tasks": []
+    }
+
+    # Mock C# Parsed Data
+    dummy_cs_path = os.path.join(mock_codebase_path, "services", "ProductService.cs")
+    os.makedirs(os.path.join(mock_codebase_path, "services"), exist_ok=True)
+    with open(dummy_cs_path, "w") as f: f.write("// C# Product Service") # Dummy content
+    
+    mock_csharp_parsed = {
+        "file_path": dummy_cs_path,
+        "usings": ["System", "System.Collections.Generic", "MyWebApp.Models"],
+        "namespaces": [{
+            "name": "MyWebApp.Services",
+            "classes": [{
+                "name": "ProductService", "namespace": "MyWebApp.Services", "attributes": ["ServiceLifetime(Singleton)"], "base_types_str": "IProductService",
+                "methods": [{"name": "GetProductById", "return_type": "Product", "parameters_str": "int productId", "attributes": []}],
+                "properties": [{"name": "DefaultRetryAttempts", "type": "int", "attributes": []}]
+            }],
+            "interfaces": []
         }],
-        "service_tasks": [{
-            "id": "Task_EmailCustomer", 
-            "name": "Email Customer",
-            "camunda_class": "com.example.EmailDelegate"
-            # 'camunda_delegateExpression' or 'camunda_expression' could also be here
-        }],
-        "user_tasks": [] # No user tasks in this simple example
+        "classes": [], "interfaces": [] # No global classes/interfaces in this example
+    }
+
+    # Mock Vue.js Parsed Data
+    dummy_vue_path = os.path.join(mock_codebase_path, "components", "LoginComponent.vue")
+    os.makedirs(os.path.join(mock_codebase_path, "components"), exist_ok=True)
+    with open(dummy_vue_path, "w") as f: f.write("<!-- Vue Login Component -->") # Dummy content
+
+    mock_vue_parsed = {
+        "file_path": dummy_vue_path,
+        "component_name": "LoginComponent", "script_lang": "javascript", "style_lang": "css",
+        "imports": ["./api/auth"],
+        "props": ["initialUsername"],
+        "data_properties": ["username", "password", "errorMsg"],
+        "methods": ["loginUser", "clearForm"],
+        "computed_properties": ["hasError"],
+        "template_components_used": ["BaseInput", "BaseButton"],
+        "template_event_bindings": [{"event": "click", "handler": "loginUser"}]
     }
     
-    # Aggregate parsed data as if collected by the main application
+    # Aggregate parsed data
     mock_all_parsed_data = {
         dummy_py_path: mock_python_parsed,
         dummy_bpmn_path: mock_bpmn_parsed,
-        dummy_pom_path: None # pom.xml might be identified by tech_scanner but not parsed by code_parser
+        dummy_cs_path: mock_csharp_parsed,
+        dummy_vue_path: mock_vue_parsed,
+        dummy_pom_path: None 
     }
 
     # --- Instantiate and Use KnowledgeGraph ---
     kg = KnowledgeGraph()
+    # kg.load_graph_from_directory(mock_codebase_path, mock_tech_scan_results, mock_all_parsed_data)
+    # Instead of load_graph_from_directory, call process_parsed_file_data directly for testing new parsers
+    logging.info("Testing individual file processors:")
+    kg.process_parsed_file_data(mock_python_parsed)
+    kg.process_parsed_file_data(mock_csharp_parsed)
+    kg.process_parsed_file_data(mock_vue_parsed)
+    # Tech scan data can be loaded if needed for full context, but not essential for unit testing new parsers
+    # kg.process_tech_scan_data(mock_tech_scan_results, mock_codebase_path)
 
-    # Load data into the graph
-    kg.load_graph_from_directory(mock_codebase_path, mock_tech_scan_results, mock_all_parsed_data)
 
     # --- Print Graph Info ---
     graph = kg.get_graph()
-    print(f"\n--- Knowledge Graph Built ---")
+    print(f"\n--- Knowledge Graph Built (Partial - Manual Calls) ---")
     print(f"Number of nodes: {graph.number_of_nodes()}")
     print(f"Number of edges: {graph.number_of_edges()}")
 
-    print("\nNodes (first 20):")
-    for i, (node_id, data) in enumerate(graph.nodes(data=True)):
-        if i >= 20:
-            print("...")
-            break
-        print(f"  ID: {node_id}, Type: {data.get('type')}, Name: {data.get('name')}, Path: {data.get('path')}")
-        # Print other relevant attributes based on node type if needed for verification
-        if data.get('type') == 'class':
-            print(f"    Base Classes: {data.get('base_classes')}")
-        if data.get('type') == 'method' or data.get('type') == 'function':
-            print(f"    Parameters: {data.get('parameters')}")
-        if data.get('type') == 'bpmn_service_task':
-            print(f"    Implementation: {data.get('camunda_class') or data.get('camunda_delegateExpression') or data.get('camunda_expression')}")
-
-
-    print("\nEdges (first 20):")
-    for i, (u, v, data) in enumerate(graph.edges(data=True)):
-        if i >= 20:
-            print("...")
-            break
-        print(f"  From: {u} --[{data.get('type')}]--> To: {v}")
-
-    # Example of how to find specific nodes or relationships (manual verification)
-    print("\n--- Example Queries ---")
-    # Find the Python file node
-    py_file_node = kg._generate_node_id("file", dummy_py_path)
-    if py_file_node in graph:
-        print(f"Python file node '{py_file_node}' found.")
-        print(f"  Neighbors of Python file: {list(graph.neighbors(py_file_node))}")
+    print("\nNodes (selected examples with new attributes):")
+    # Python method with decorators
+    py_method_id = kg._generate_node_id("method", dummy_py_path, "UserService", "get_user")
+    if py_method_id in graph:
+        print(f"  Python Method: {py_method_id}, Attrs: {graph.nodes[py_method_id]}")
     
-    # Find the Camunda technology node
-    camunda_tech_node = kg._generate_node_id("tech_reference", "camunda")
-    if camunda_tech_node in graph:
-        print(f"Camunda tech reference node '{camunda_tech_node}' found.")
-        print(f"  Files mentioning Camunda: {list(graph.predecessors(camunda_tech_node))}")
+    # C# class
+    cs_class_id = kg._generate_node_id("csharp_class", dummy_cs_path, "ProductService")
+    if cs_class_id in graph:
+        print(f"  C# Class: {cs_class_id}, Attrs: {graph.nodes[cs_class_id]}")
 
-    # Clean up dummy files and directories (optional, good for repeated testing)
+    # Vue component
+    vue_comp_primary_id = kg._generate_node_id("vue_component", dummy_vue_path, "LoginComponent")
+    if vue_comp_primary_id in graph:
+         print(f"  Vue Component (Primary): {vue_comp_primary_id}, Attrs: {graph.nodes[vue_comp_primary_id]}")
+    
+    # Vue prop (example)
+    vue_prop_id = kg._generate_node_id("vue_prop", dummy_vue_path, "LoginComponent", "initialUsername")
+    if vue_prop_id in graph:
+        print(f"  Vue Prop: {vue_prop_id}, Attrs: {graph.nodes[vue_prop_id]}")
+
+
+    # Example of finding edges (e.g., Vue component uses BaseInput)
+    # base_input_id = kg._generate_node_id("vue_component", "BaseInput") # Name only for external/unresolved
+    # if graph.has_edge(vue_comp_primary_id, base_input_id):
+    #     print(f"  Edge found: {vue_comp_primary_id} --uses_component_in_template--> {base_input_id}")
+
+
+    # Clean up dummy files and directories
     import shutil
     try:
         shutil.rmtree(mock_codebase_path)
         logging.info(f"Cleaned up dummy directory: {mock_codebase_path}")
     except OSError as e:
         logging.error(f"Error cleaning up dummy directory {mock_codebase_path}: {e}")
-
-# Placeholder for __main__ example

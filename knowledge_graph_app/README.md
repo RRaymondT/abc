@@ -9,7 +9,9 @@ The primary goal is to provide insights into the architecture, dependencies, and
 ## Key Features
 
 *   **Technology Identification:** Scans for project files (e.g., `pom.xml`, `package.json`, `requirements.txt`) and keywords within files to identify the technology stack (e.g., Maven, NPM, Python, Camunda, Spring).
-*   **Python Code Parsing:** Utilizes Abstract Syntax Trees (AST) to parse Python files, extracting information about classes, methods, functions, imports, and calls.
+*   **Python Code Parsing:** Utilizes Abstract Syntax Trees (AST) to parse Python files, extracting information about classes, methods, functions, imports, calls, and decorators.
+*   **C# Parsing (Basic):** Extracts namespaces, `using` directives, class definitions (name, attributes, base types), interface definitions, method signatures (name, attributes, return type, parameters), and property definitions from `.cs` files.
+*   **Vue.js SFC Parsing (Basic):** Parses `.vue` files to extract information from `<template>` (component usage, event bindings), `<script>` (component name, script language, imports, props, data object keys, method names, computed property names), and `<style>` (style language).
 *   **BPMN Parsing:** Extracts key elements from Camunda BPMN 2.0 XML files, such as processes, service tasks (with implementation details), and user tasks.
 *   **Graph Construction:** Builds a directed graph using the `networkx` library, representing files, code elements, technologies, and their relationships.
 *   **Interactive Visualization:** Launches a Flask web server to display the graph using Vis.js, allowing for interactive exploration of nodes and edges.
@@ -117,22 +119,18 @@ knowledge_graph_app/
 ## Modules Overview
 
 *   **`src/tech_scanner.py`**: Identifies technologies (e.g., Maven, Spring, Camunda) and project configuration files (e.g., `pom.xml`, `package.json`) by scanning filenames and file content for specific keywords and patterns.
-*   **`src/code_parser.py`**: Responsible for parsing individual source files. Currently supports:
-    *   Python files: Using Abstract Syntax Trees (AST) to extract imports, classes, methods, functions, and their calls.
-    *   BPMN files: Parsing `.bpmn` or `.xml` files to identify Camunda processes, service tasks, user tasks, and their attributes (like Java delegate classes).
-    *   Includes placeholders for future parsers (e.g., C#, Vue).
-*   **`src/graph_builder.py`**: Constructs the knowledge graph using the `networkx` library. It takes data from the tech scanner and code parser to create nodes (representing files, code elements, technologies) and edges (representing relationships like "imports", "calls", "defines_class", "uses_technology").
+*   **`src/code_parser.py`**: Parses source files to extract structural information. Supports Python (including decorators), C# (basic constructs), and Vue.js SFCs.
+*   **`src/graph_builder.py`**: Constructs the knowledge graph using `networkx`, processing entities from Python, C#, Vue.js, BPMN, and technology scans.
 *   **`src/visualizer.py`**: Handles the web-based visualization of the graph. It uses Flask to serve an HTML page and `export_graph_to_json` to convert the `networkx` graph into a JSON format suitable for the Vis.js library, which then renders the interactive graph in the browser.
-*   **`src/llm_export.py`**: Generates a detailed Markdown summary of the knowledge graph. This format is designed for easier consumption by Large Language Models (LLMs), providing a textual representation of the codebase's structure and components.
+*   **`src/llm_export.py`**: Generates Markdown summaries of the graph, including details for Python, C#, and Vue.js entities.
 *   **`src/templates/index.html`**: The HTML template used by `visualizer.py`. It includes the Vis.js library and JavaScript code to fetch graph data from the Flask backend and render it.
 
 ## Current Limitations & Future Enhancements
 
 ### Parsing
-*   **Python:** Parsing is relatively detailed (imports, classes, methods, functions, basic call name extraction).
+*   **C# and Vue.js Parsers:** The C# and Vue.js parsers are regex-based and primarily target common declarative patterns. They do not build full Abstract Syntax Trees (ASTs) and thus have a limited semantic understanding of the code (e.g., for complex type resolution or detailed call graph analysis within C# methods or JavaScript/TypeScript in Vue components).
+*   **Python Parsing:** Decorator extraction records the presence of decorators but does not analyze their runtime effects on the decorated entities. Call linking is primarily name-based and within the scope of a single file. Full cross-file call resolution and resolving calls to external libraries accurately is complex and not fully implemented.
 *   **BPMN:** Basic element extraction for Camunda processes, service tasks, and user tasks.
-*   **Other Languages:** Support for languages like Java, C#, JavaScript beyond simple keyword spotting is currently limited. Placeholders for more advanced parsers exist in `code_parser.py`.
-*   **Call Graph Resolution (Python):** Call linking is primarily name-based and within the scope of a single file. Full cross-file call resolution and resolving calls to external libraries accurately is complex and not fully implemented.
 
 ### Scalability
 *   **Large Codebases:** Performance might degrade on extremely large codebases due to the number of files to scan and parse. The `--max_files_parse` argument is a current workaround to limit processing time.
@@ -146,9 +144,10 @@ knowledge_graph_app/
 *   Error handling is basic. Complex or malformed code structures might lead to parsing errors or incomplete graph data.
 
 ### Future Enhancements
-*   **Expanded Language Support:** Implement more sophisticated parsers for Java, C#, JavaScript, and other common languages.
-*   **Deeper Static Analysis:**
-    *   More accurate call graph resolution (inter-file, library calls).
+*   **More Robust Parsing:** Improve parsing for C# and JavaScript/TypeScript (within Vue SFCs), potentially by integrating with external tools (e.g., Roslyn for C#, Babel/ESLint for JS/TS) or dedicated libraries for deeper and more accurate analysis.
+*   **Semantic Analysis:** Introduce semantic analysis capabilities, such as basic type resolution across supported languages and more accurate inter-file call graph construction.
+*   **Expanded Language Support:** Implement more sophisticated parsers for other common languages (e.g., Java).
+*   **Deeper Static Analysis (Python, C#, etc.):**
     *   Data flow analysis.
     *   Identification of design patterns or anti-patterns.
 *   **Configuration File Parsing:** Extracting information from Spring XML/Java config, Kubernetes YAMLs, etc.
