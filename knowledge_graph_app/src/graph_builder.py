@@ -435,12 +435,16 @@ class KnowledgeGraph:
             self.add_edge(file_node_id, ns_node_id, relationship_type="defines_namespace")
 
             # Process entities within this namespace
-            self._process_csharp_entities(ns_data.get('classes', []), file_node_id, ns_node_id, ns_name)
-            self._process_csharp_entities(ns_data.get('interfaces', []), file_node_id, ns_node_id, ns_name, is_interface=True)
+            self._process_csharp_entities(ns_data.get('classes', []), file_node_id, file_path, ns_node_id, ns_name)
+            self._process_csharp_entities(ns_data.get('interfaces', []), file_node_id, file_path, ns_node_id, ns_name, is_interface=True)
 
         # Process top-level classes and interfaces (outside any explicit namespace)
-        self._process_csharp_entities(parsed_data.get('classes', []), file_node_id, None, None)
-        self._process_csharp_entities(parsed_data.get('interfaces', []), file_node_id, None, None, is_interface=True)
+        # These are entities from parsed_data['classes'] or parsed_data['interfaces'] that *don't* have a 'namespace' attribute
+        # or whose 'namespace' attribute was None.
+        # The _process_csharp_entities method itself filters by matching entity_data.get('namespace') with the passed ns_name.
+        # So, for global entities, we pass ns_name=None.
+        self._process_csharp_entities(parsed_data.get('classes', []), file_node_id, file_path, None, None)
+        self._process_csharp_entities(parsed_data.get('interfaces', []), file_node_id, file_path, None, None, is_interface=True)
 
 
     def _process_csharp_entities(self, entities_data: list, file_node_id: str, file_path_for_id_gen: str, ns_node_id: str | None, ns_name: str | None, is_interface=False):
@@ -508,9 +512,16 @@ class KnowledgeGraph:
             for prop_data in entity_data.get('properties', []):
                 prop_name = prop_data['name']
                 prop_node_id = self._generate_node_id("csharp_property", file_path_for_id_gen, entity_name, prop_name)
+                method_attrs = {k:v for k,v in method_attrs.items() if v is not None} # Ensure this line was present for methods
+                self.add_node(method_node_id, node_type="csharp_method", **method_attrs)
+                self.add_edge(entity_node_id, method_node_id, relationship_type="defines_method")
+
+            for prop_data in entity_data.get('properties', []):
+                prop_name = prop_data['name']
+                prop_node_id = self._generate_node_id("csharp_property", file_path_for_id_gen, entity_name, prop_name)
                 prop_attrs = {
                     "name": prop_name,
-                    "type": prop_data.get('type'),
+                    "csharp_type": prop_data.get('type'), # Changed 'type' to 'csharp_type'
                     "attributes": prop_data.get('attributes', []),
                     "parent_entity_name": entity_name,
                     "file_path": file_path_for_id_gen

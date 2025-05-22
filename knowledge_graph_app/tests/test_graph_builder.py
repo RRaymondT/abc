@@ -355,7 +355,7 @@ class TestGraphBuilder(unittest.TestCase):
 
         prop_node_id = self.kg._generate_node_id("csharp_property", file_path, "ExampleService", "IsEnabled")
         self.assertTrue(g.has_node(prop_node_id))
-        self.assertEqual(g.nodes[prop_node_id]['type'], "bool")
+        self.assertEqual(g.nodes[prop_node_id]['csharp_type'], "bool") # Changed 'type' to 'csharp_type'
         self.assertTrue(g.has_edge(class_node_id, prop_node_id))
 
 
@@ -408,34 +408,40 @@ class TestGraphBuilder(unittest.TestCase):
     def test_process_ef_dbcontext_data_sample(self):
         """Test processing of C# DbContext data including EF configurations."""
         file_path = '/app/data/MyDbContext.cs'
+        # Corrected mock_ef_data structure to match parse_csharp_file output
         mock_ef_data = {
             "file_path": file_path,
-            "classes": [{ # Assuming the DbContext class is passed directly or as part of a larger structure
-                "name": "MyDbContext", "namespace": "MyProject.Data", "is_dbcontext": True,
-                "base_types_str": "DbContext",
-                "db_sets": [
-                    {"entity_name": "Blog", "property_name": "Blogs"},
-                    {"entity_name": "Post", "property_name": "Posts"}
-                ],
-                "ef_configurations": [
-                    {"entity_configured": "Blog", "call_type": "HasKey", "details": {"key_expression": "b => b.BlogId", "keys_found":["BlogId"]}},
-                    {"entity_configured": "Blog", "call_type": "Property", "details": {"property_name": "Url", "is_required": True}},
-                    {"entity_configured": "Post", "call_type": "HasMany_WithOne", "details": {"target_entity": "Blog", "source_navigation": "Posts", "target_navigation": "Blog", "foreign_key": "BlogId"}}
-                ],
-                "methods": [], # Keep methods list for consistent structure, even if empty for this test
-                "properties": [] # Keep properties list
+            "usings": ["Microsoft.EntityFrameworkCore"],
+            "namespaces": [{
+                "name": "MyProject.Data",
+                "classes": [{
+                    "name": "MyDbContext", "namespace": "MyProject.Data", "is_dbcontext": True,
+                    "base_types_str": "DbContext", "attributes": [],
+                    "db_sets": [
+                        {"entity_name": "Blog", "property_name": "Blogs"},
+                        {"entity_name": "Post", "property_name": "Posts"}
+                    ],
+                    "ef_configurations": [
+                        {"entity_configured": "Blog", "call_type": "HasKey", "details": {"key_expression": "b => b.BlogId", "keys_found":["BlogId"]}},
+                        {"entity_configured": "Blog", "call_type": "Property", "details": {"property_name": "Url", "is_required": True}},
+                        {"entity_configured": "Post", "call_type": "HasMany_WithOne", "details": {"target_entity": "Blog", "source_navigation": "Posts", "target_navigation": "Blog", "foreign_key": "BlogId"}}
+                    ],
+                    "methods": [{"name": "OnModelCreating", "parameters_str":"ModelBuilder modelBuilder", "return_type":"void", "attributes":[]}], 
+                    "properties": [ # DbSets are also properties
+                        {"name": "Blogs", "type": "DbSet<Blog>", "attributes": []},
+                        {"name": "Posts", "type": "DbSet<Post>", "attributes": []}
+                    ]
+                }],
+                "interfaces": []
             }],
-            # Need to ensure the 'type' indicates C# for the dispatcher
-            "usings": ["Microsoft.EntityFrameworkCore"] # Add a typical C# using to help dispatcher
+            "classes": [], # No global classes in this example
+            "interfaces": []
         }
         
-        # We also need the Product and Category classes to be "parsed" if EF configs refer to them as entities
-        # For simplicity, we'll assume they are also part of this mock or processed separately.
-        # Here, we'll focus on the DbContext processing.
-
-        self.kg.process_parsed_file_data(mock_ef_data) # This will dispatch to process_csharp_parsed_data
+        self.kg.process_parsed_file_data(mock_ef_data) 
         g = self.kg.get_graph()
 
+        # DbContext node ID should use file_path from mock_ef_data for generation
         dbcontext_node_id = self.kg._generate_node_id("csharp_class", file_path, "MyDbContext")
         self.assertTrue(g.has_node(dbcontext_node_id))
 
@@ -443,19 +449,21 @@ class TestGraphBuilder(unittest.TestCase):
         blog_entity_node_id = self.kg._generate_node_id("db_entity::Blog")
         self.assertTrue(g.has_node(blog_entity_node_id))
         self.assertTrue(g.has_edge(dbcontext_node_id, blog_entity_node_id))
-        self.assertEqual(g.edges[(dbcontext_node_id, blog_entity_node_id, 0)]['set_name'], 'Blogs')
+        self.assertEqual(g.edges[dbcontext_node_id, blog_entity_node_id]['set_name'], 'Blogs')
 
         # Check HasKey configuration
         blogid_prop_node_id = self.kg._generate_node_id(blog_entity_node_id, "property", "BlogId")
         self.assertTrue(g.has_node(blogid_prop_node_id))
         self.assertTrue(g.nodes[blogid_prop_node_id]['is_primary_key'])
-        self.assertTrue(g.has_edge(blog_entity_node_id, blogid_prop_node_id, type="has_primary_key_property"))
+        self.assertTrue(g.has_edge(blog_entity_node_id, blogid_prop_node_id))
+        self.assertEqual(g.edges[blog_entity_node_id, blogid_prop_node_id]['type'], "has_primary_key_property")
 
         # Check Property configuration
         url_prop_node_id = self.kg._generate_node_id(blog_entity_node_id, "property", "Url")
         self.assertTrue(g.has_node(url_prop_node_id))
         self.assertTrue(g.nodes[url_prop_node_id]['is_required'])
-        self.assertTrue(g.has_edge(blog_entity_node_id, url_prop_node_id, type="has_property_configured"))
+        self.assertTrue(g.has_edge(blog_entity_node_id, url_prop_node_id))
+        self.assertEqual(g.edges[blog_entity_node_id, url_prop_node_id]['type'], "has_property_configured")
 
         # Check Relationship configuration
         post_entity_node_id = self.kg._generate_node_id("db_entity::Post")
@@ -469,7 +477,7 @@ class TestGraphBuilder(unittest.TestCase):
         # Edge type created by graph_builder: hasmany_to_withone
         # The source of this edge is 'Post' (entity_configured), target is 'Blog' (target_entity from details)
         self.assertTrue(g.has_edge(post_entity_node_id, blog_entity_node_id))
-        edge_data = g.get_edge_data(post_entity_node_id, blog_entity_node_id)[0] # Assuming one edge
+        edge_data = g.edges[post_entity_node_id, blog_entity_node_id] 
         self.assertEqual(edge_data['type'], "hasmany_to_withone")
         self.assertEqual(edge_data.get('source_navigation'), "Posts") # Nav prop on Blog
         self.assertEqual(edge_data.get('target_navigation'), "Blog") # Nav prop on Post
@@ -506,7 +514,7 @@ class TestGraphBuilder(unittest.TestCase):
         self.assertTrue(g.has_node(img1_node_id))
         self.assertEqual(g.nodes[img1_node_id]['image_tag'], 'v1')
         self.assertTrue(g.has_edge(dep_node_id, img1_node_id))
-        self.assertEqual(g.get_edge_data(dep_node_id, img1_node_id)[0]['container_name'], 'main')
+        self.assertEqual(g.edges[dep_node_id, img1_node_id]['container_name'], 'main')
 
 
     def test_process_python_data_flow_links(self):
@@ -545,7 +553,7 @@ class TestGraphBuilder(unittest.TestCase):
         self.assertTrue(g.has_node(target_node_id))
         
         self.assertTrue(g.has_edge(source_node_id, target_node_id))
-        edge_data = g.get_edge_data(source_node_id, target_node_id)[0] # Assuming one edge
+        edge_data = g.edges[source_node_id, target_node_id]
         self.assertEqual(edge_data['type'], "potential_data_flow")
         self.assertEqual(edge_data['intermediate_variable'], "var_x")
         self.assertEqual(edge_data['flow_through_function_name'], "main_flow")
