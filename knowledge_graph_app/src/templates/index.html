@@ -109,7 +109,22 @@
                 inferred_entity: { color: { background: '#FFE4B5', border: '#FFDAB9', shape:'database' } },
                 technology_reference: { color: { background: '#40E0D0', border: '#00CED1'}, shape:'star', size: 20},
                 project_file: { color: { background: '#FAFAD2', border: '#FFFFE0'}, shape:'square', icon: { code: '\uf15b', color: '#2B7CE9' } }, // Example: file icon
-                codebase: { color: { background: '#A52A2A', border: '#800000' }, shape:'circle', size: 25 }
+                codebase: { color: { background: '#A52A2A', border: '#800000' }, shape:'circle', size: 25 },
+                // New groups for DB, K8s, Docker
+                db_entity: { color: { background: '#FFD700', border: '#B8860B' }, shape: 'box' }, // Gold, DarkGoldenrod border
+                db_property: { color: { background: '#FFFACD', border: '#FFEC8B' }, shape: 'ellipse', size: 10 }, // LemonChiffon, LightGoldenrod border
+                k8s_yaml_file: { color: { background: '#B0E0E6', border: '#708090'}, shape: 'document' }, // PowderBlue, SlateGray border
+                k8s_deployment: { color: { background: '#87CEEB', border: '#4682B4' }, shape: 'box' }, // SkyBlue, SteelBlue border
+                k8s_service: { color: { background: '#98FB98', border: '#3CB371' }, shape: 'diamond' }, // PaleGreen, MediumSeaGreen border
+                k8s_configmap: { color: { background: '#D3D3D3', border: '#A9A9A9' }, shape: 'box' }, // LightGray, DarkGray border
+                k8s_secret: { color: { background: '#C0C0C0', border: '#808080' }, shape: 'box' }, // Silver, Gray border
+                k8s_resource: { color: { background: '#E0E0E0', border: '#BEBEBE' }, shape: 'box' }, // Generic K8s (lighter grey)
+                k8s_statefulset: { color: { background: '#87CEFA', border: '#4169E1' }, shape: 'box' }, // LightSkyBlue, RoyalBlue border
+                k8s_job: { color: { background: '#F0E68C', border: '#BDB76B' }, shape: 'box' }, // Khaki, DarkKhaki border
+                k8s_cronjob: { color: { background: '#EEDD82', border: '#DAA520' }, shape: 'box' }, // LightGoldenrod, Goldenrod border
+                docker_image: { color: { background: '#AED6F1', border: '#5DADE2' }, shape: 'hexagon' }, // Light Steel Blue, DodgerBlue border
+                // For data flow edges, if desired to style them distinctly (though usually done by edge label)
+                // potential_data_flow: { color: '#FF7F50', dashes: true } // Example for edges, applied in edge definition
             }
         };
 

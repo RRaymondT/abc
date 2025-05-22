@@ -405,5 +405,151 @@ class TestGraphBuilder(unittest.TestCase):
         self.assertTrue(g.has_edge(comp_node_id, method_node_id, type="on_click_calls_method"))
 
 
+    def test_process_ef_dbcontext_data_sample(self):
+        """Test processing of C# DbContext data including EF configurations."""
+        file_path = '/app/data/MyDbContext.cs'
+        mock_ef_data = {
+            "file_path": file_path,
+            "classes": [{ # Assuming the DbContext class is passed directly or as part of a larger structure
+                "name": "MyDbContext", "namespace": "MyProject.Data", "is_dbcontext": True,
+                "base_types_str": "DbContext",
+                "db_sets": [
+                    {"entity_name": "Blog", "property_name": "Blogs"},
+                    {"entity_name": "Post", "property_name": "Posts"}
+                ],
+                "ef_configurations": [
+                    {"entity_configured": "Blog", "call_type": "HasKey", "details": {"key_expression": "b => b.BlogId", "keys_found":["BlogId"]}},
+                    {"entity_configured": "Blog", "call_type": "Property", "details": {"property_name": "Url", "is_required": True}},
+                    {"entity_configured": "Post", "call_type": "HasMany_WithOne", "details": {"target_entity": "Blog", "source_navigation": "Posts", "target_navigation": "Blog", "foreign_key": "BlogId"}}
+                ],
+                "methods": [], # Keep methods list for consistent structure, even if empty for this test
+                "properties": [] # Keep properties list
+            }],
+            # Need to ensure the 'type' indicates C# for the dispatcher
+            "usings": ["Microsoft.EntityFrameworkCore"] # Add a typical C# using to help dispatcher
+        }
+        
+        # We also need the Product and Category classes to be "parsed" if EF configs refer to them as entities
+        # For simplicity, we'll assume they are also part of this mock or processed separately.
+        # Here, we'll focus on the DbContext processing.
+
+        self.kg.process_parsed_file_data(mock_ef_data) # This will dispatch to process_csharp_parsed_data
+        g = self.kg.get_graph()
+
+        dbcontext_node_id = self.kg._generate_node_id("csharp_class", file_path, "MyDbContext")
+        self.assertTrue(g.has_node(dbcontext_node_id))
+
+        # Check DbSet processing
+        blog_entity_node_id = self.kg._generate_node_id("db_entity::Blog")
+        self.assertTrue(g.has_node(blog_entity_node_id))
+        self.assertTrue(g.has_edge(dbcontext_node_id, blog_entity_node_id))
+        self.assertEqual(g.edges[(dbcontext_node_id, blog_entity_node_id, 0)]['set_name'], 'Blogs')
+
+        # Check HasKey configuration
+        blogid_prop_node_id = self.kg._generate_node_id(blog_entity_node_id, "property", "BlogId")
+        self.assertTrue(g.has_node(blogid_prop_node_id))
+        self.assertTrue(g.nodes[blogid_prop_node_id]['is_primary_key'])
+        self.assertTrue(g.has_edge(blog_entity_node_id, blogid_prop_node_id, type="has_primary_key_property"))
+
+        # Check Property configuration
+        url_prop_node_id = self.kg._generate_node_id(blog_entity_node_id, "property", "Url")
+        self.assertTrue(g.has_node(url_prop_node_id))
+        self.assertTrue(g.nodes[url_prop_node_id]['is_required'])
+        self.assertTrue(g.has_edge(blog_entity_node_id, url_prop_node_id, type="has_property_configured"))
+
+        # Check Relationship configuration
+        post_entity_node_id = self.kg._generate_node_id("db_entity::Post")
+        self.assertTrue(g.has_node(post_entity_node_id)) # Created from DbSet or relationship
+        # Edge from Post to Blog (as Post.Blog is the navigation for HasOne side of HasMany)
+        # The graph builder logic for HasMany_WithOne creates edge from the "many" side (Post) to the "one" side (Blog)
+        # if the parser provides `target_entity` correctly.
+        # The example parser for EF provides `target_entity` based on `WithOne` or `WithMany` argument.
+        # Our mock `ef_configurations` for Post: `target_entity` is `Blog`.
+        # The relationship is from Post (entity_configured) to Blog (target_entity).
+        # Edge type created by graph_builder: hasmany_to_withone
+        # The source of this edge is 'Post' (entity_configured), target is 'Blog' (target_entity from details)
+        self.assertTrue(g.has_edge(post_entity_node_id, blog_entity_node_id))
+        edge_data = g.get_edge_data(post_entity_node_id, blog_entity_node_id)[0] # Assuming one edge
+        self.assertEqual(edge_data['type'], "hasmany_to_withone")
+        self.assertEqual(edge_data.get('source_navigation'), "Posts") # Nav prop on Blog
+        self.assertEqual(edge_data.get('target_navigation'), "Blog") # Nav prop on Post
+        self.assertEqual(edge_data.get('foreign_key'), "BlogId")
+
+
+    def test_process_k8s_yaml_data_sample(self):
+        """Test processing of parsed Kubernetes YAML data."""
+        k8s_file_path = "/deploy/my-app.yaml"
+        mock_k8s_data = [
+            {"file_path": k8s_file_path, "kind": "Deployment", "name": "app-deploy", "namespace": "dev",
+             "containers": [{"name": "main", "image": "myimage:v1"}, {"name": "sidecar", "image": "helper:latest"}]},
+            {"file_path": k8s_file_path, "kind": "Service", "name": "app-svc", "namespace": "dev",
+             "service_type": "LoadBalancer", "selector": {"app": "my-app"}}
+        ]
+        self.kg.process_k8s_yaml_data(mock_k8s_data, k8s_file_path)
+        g = self.kg.get_graph()
+
+        file_node_id = self.kg._generate_node_id("k8s_yaml_file", k8s_file_path)
+        self.assertTrue(g.has_node(file_node_id))
+
+        dep_node_id = self.kg._generate_node_id("k8s_resource", k8s_file_path, "Deployment", "dev", "app-deploy")
+        self.assertTrue(g.has_node(dep_node_id))
+        self.assertEqual(g.nodes[dep_node_id]['type'], 'k8s_deployment')
+        self.assertTrue(g.has_edge(file_node_id, dep_node_id))
+
+        svc_node_id = self.kg._generate_node_id("k8s_resource", k8s_file_path, "Service", "dev", "app-svc")
+        self.assertTrue(g.has_node(svc_node_id))
+        self.assertEqual(g.nodes[svc_node_id]['type'], 'k8s_service')
+        self.assertEqual(g.nodes[svc_node_id]['service_type'], 'LoadBalancer')
+        self.assertTrue(g.has_edge(file_node_id, svc_node_id))
+
+        img1_node_id = self.kg._generate_node_id("docker_image::myimage:v1")
+        self.assertTrue(g.has_node(img1_node_id))
+        self.assertEqual(g.nodes[img1_node_id]['image_tag'], 'v1')
+        self.assertTrue(g.has_edge(dep_node_id, img1_node_id))
+        self.assertEqual(g.get_edge_data(dep_node_id, img1_node_id)[0]['container_name'], 'main')
+
+
+    def test_process_python_data_flow_links(self):
+        """Test processing of Python data flow links."""
+        file_path = 'data_flow_example.py'
+        mock_py_flow_data = {
+            "file_path": file_path,
+            "functions": [
+                {"name": "source_a", "parameters": [], "calls": [], "data_flow_links": []},
+                {"name": "process_b", "parameters": ["data"], "calls": [], "data_flow_links": []},
+                {
+                    "name": "main_flow", "parameters": [], "calls": ["source_a", "process_b"],
+                    "data_flow_links": [{
+                        "source_function": "source_a", 
+                        "intermediate_variable": "var_x",
+                        "target_function": "process_b",
+                        "arg_index": 0 
+                    }]
+                }
+            ],
+            "classes": [] # Ensure this key exists even if empty
+        }
+        self.kg.process_parsed_file_data(mock_py_flow_data)
+        g = self.kg.get_graph()
+
+        source_node_id = self.kg._find_or_create_callable_node(file_path, "source_a")
+        target_node_id = self.kg._find_or_create_callable_node(file_path, "process_b")
+        
+        # Ensure the callable nodes were actually created as functions from the parsed data
+        # (not just as external_or_unresolved_callable by _find_or_create_callable_node)
+        expected_source_id = self.kg._generate_node_id("function", file_path, "source_a")
+        expected_target_id = self.kg._generate_node_id("function", file_path, "process_b")
+        self.assertEqual(source_node_id, expected_source_id)
+        self.assertEqual(target_node_id, expected_target_id)
+        self.assertTrue(g.has_node(source_node_id))
+        self.assertTrue(g.has_node(target_node_id))
+        
+        self.assertTrue(g.has_edge(source_node_id, target_node_id))
+        edge_data = g.get_edge_data(source_node_id, target_node_id)[0] # Assuming one edge
+        self.assertEqual(edge_data['type'], "potential_data_flow")
+        self.assertEqual(edge_data['intermediate_variable'], "var_x")
+        self.assertEqual(edge_data['flow_through_function_name'], "main_flow")
+
+
 if __name__ == '__main__':
     unittest.main()

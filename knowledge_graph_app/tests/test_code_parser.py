@@ -352,6 +352,161 @@ export default {
         self.assertEqual(result_script['script_lang'], 'javascript') # Default
         self.assertEqual(result_script['template_components_used'], [])
 
+    def test_parse_csharp_dbcontext(self):
+        """Test parsing of C# DbContext with EF Core configurations."""
+        CSHARP_EF_CODE = """
+using Microsoft.EntityFrameworkCore;
+using System.Collections.Generic;
+
+namespace MyProject.Data
+{
+    public class Blog
+    {
+        public int BlogId { get; set; }
+        public string Url { get; set; }
+        public List<Post> Posts { get; set; }
+    }
+
+    public class Post
+    {
+        public int PostId { get; set; }
+        public string Title { get; set; }
+        public string Content { get; set; }
+        public int BlogId { get; set; } // Foreign Key
+        public Blog Blog { get; set; }  // Navigation Property
+    }
+
+    public class MyAppContext : DbContext
+    {
+        public DbSet<Blog> Blogs { get; set; }
+        public DbSet<Post> Posts { get; set; }
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<Blog>()
+                .HasKey(b => b.BlogId); // Single key
+
+            modelBuilder.Entity<Blog>().Property(b => b.Url).IsRequired(); // Simple property
+
+            modelBuilder.Entity<Post>(entity => { // Lambda for entity
+                entity.HasKey(p => p.PostId);
+                entity.Property(p => p.Title)
+                      .IsRequired()
+                      .HasMaxLength(200);
+                entity.HasOne(p => p.Blog) // Defines relationship Post -> Blog
+                      .WithMany(b => b.Posts) // Blog has many Posts
+                      .HasForeignKey(p => p.BlogId); // Foreign key in Post
+            });
+        }
+    }
+}
+"""
+        cs_file = self._create_file('test_ef.cs', CSHARP_EF_CODE)
+        from code_parser import parse_csharp_file # Ensure direct import for specific test
+        result = parse_csharp_file(cs_file)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result['namespaces']), 1)
+        ns_info = result['namespaces'][0]
+        self.assertEqual(ns_info['name'], "MyProject.Data")
+        
+        dbcontext_class_info = next((c for c in ns_info['classes'] if c['name'] == 'MyAppContext'), None)
+        self.assertIsNotNone(dbcontext_class_info)
+        self.assertTrue(dbcontext_class_info['is_dbcontext'])
+        
+        # Test DbSets
+        self.assertEqual(len(dbcontext_class_info['db_sets']), 2)
+        db_set_names = {ds['property_name'] for ds in dbcontext_class_info['db_sets']}
+        self.assertIn('Blogs', db_set_names)
+        self.assertIn('Posts', db_set_names)
+        blog_dbset = next(ds for ds in dbcontext_class_info['db_sets'] if ds['property_name'] == 'Blogs')
+        self.assertEqual(blog_dbset['entity_name'], 'Blog')
+
+        # Test EF Configurations
+        ef_configs = dbcontext_class_info['ef_configurations']
+        self.assertGreaterEqual(len(ef_configs), 4) # Expect at least HasKey, Property, HasKey, Property, HasOne/WithMany
+
+        blog_haskey_config = next((c for c in ef_configs if c['entity_configured'] == 'Blog' and c['call_type'] == 'HasKey'), None)
+        self.assertIsNotNone(blog_haskey_config)
+        self.assertIn('BlogId', blog_haskey_config['details'].get('keys_found', []))
+
+        blog_prop_url_config = next((c for c in ef_configs if c['entity_configured'] == 'Blog' and c['call_type'] == 'Property' and c['details'].get('property_name') == 'Url'), None)
+        self.assertIsNotNone(blog_prop_url_config)
+        self.assertTrue(blog_prop_url_config['details'].get('is_required'))
+
+        post_haskey_config = next((c for c in ef_configs if c['entity_configured'] == 'Post' and c['call_type'] == 'HasKey'), None)
+        self.assertIsNotNone(post_haskey_config)
+        self.assertIn('PostId', post_haskey_config['details'].get('keys_found', []))
+
+        post_prop_title_config = next((c for c in ef_configs if c['entity_configured'] == 'Post' and c['call_type'] == 'Property' and c['details'].get('property_name') == 'Title'), None)
+        self.assertIsNotNone(post_prop_title_config)
+        self.assertTrue(post_prop_title_config['details'].get('is_required'))
+        self.assertEqual(post_prop_title_config['details'].get('max_length'), 200)
+        
+        post_rel_blog_config = next((c for c in ef_configs if c['entity_configured'] == 'Post' and c['call_type'] == 'HasOne_WithMany'), None)
+        self.assertIsNotNone(post_rel_blog_config)
+        # Based on current _parse_ef_onmodelcreating_body, details might be like:
+        # {'one_arg': None, 'many_arg': None, 'nav_prop': 'Posts'} for HasOne(p => p.Blog).WithMany(b => b.Posts)
+        # The parser needs to be robust in capturing these details. For this test, we check what's plausible.
+        # The example `_parse_ef_onmodelcreating_body` was simplified and might not provide all these details perfectly.
+        # This test will pass if the call_type is identified. Details might need parser refinement.
+        self.assertEqual(post_rel_blog_config['details'].get('nav_prop'), "Posts") # p.Blog is source nav, b.Posts is target nav
+
+    def test_parse_python_data_flow(self):
+        """Test parsing of Python code for basic data flow links."""
+        PYTHON_DATA_FLOW_CODE = """
+def source_a():
+    return "data_a"
+
+def source_b():
+    return "data_b"
+
+def process_ab(input_a, input_b="default_b"):
+    res = input_a + input_b
+    return res
+
+def sink_c(data_c):
+    print(data_c)
+
+def main_flow_test():
+    var_a = source_a()  # var_a from source_a
+    var_b = source_b()  # var_b from source_b
+    
+    # var_a (from source_a) flows to process_ab as input_a (arg_index 0)
+    # var_b (from source_b) flows to process_ab as input_b (keyword_arg_name 'input_b')
+    processed_data = process_ab(var_a, input_b=var_b) 
+    
+    # processed_data (from process_ab) flows to sink_c as data_c (arg_index 0)
+    sink_c(processed_data) 
+"""
+        py_file = self._create_file('test_data_flow.py', PYTHON_DATA_FLOW_CODE)
+        result = parse_python_file(py_file)
+        self.assertIsNotNone(result)
+        
+        main_flow_func_info = next((f for f in result['functions'] if f['name'] == 'main_flow_test'), None)
+        self.assertIsNotNone(main_flow_func_info)
+        
+        data_flows = main_flow_func_info['data_flow_links']
+        self.assertEqual(len(data_flows), 3) # Expecting three links
+
+        # Flow 1: source_a -> process_ab
+        flow1 = next((df for df in data_flows if df['source_function'] == 'source_a' and df['target_function'] == 'process_ab'), None)
+        self.assertIsNotNone(flow1)
+        self.assertEqual(flow1['intermediate_variable'], 'var_a')
+        self.assertEqual(flow1['arg_index'], 0) # var_a is the first positional argument
+
+        # Flow 2: source_b -> process_ab
+        flow2 = next((df for df in data_flows if df['source_function'] == 'source_b' and df['target_function'] == 'process_ab'), None)
+        self.assertIsNotNone(flow2)
+        self.assertEqual(flow2['intermediate_variable'], 'var_b')
+        self.assertEqual(flow2['keyword_arg_name'], 'input_b')
+
+        # Flow 3: process_ab -> sink_c
+        flow3 = next((df for df in data_flows if df['source_function'] == 'process_ab' and df['target_function'] == 'sink_c'), None)
+        self.assertIsNotNone(flow3)
+        self.assertEqual(flow3['intermediate_variable'], 'processed_data')
+        self.assertEqual(flow3['arg_index'], 0)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -113,14 +113,29 @@ if __name__ == '__main__':
     sample_graph.add_node("method::/app/service.py::MyService::do_work", name="do_work", type="method", class_name="MyService", signature="()")
     sample_graph.add_node("module::flask", name="flask", type="python_module", external=True)
     sample_graph.add_node("tech::camunda", name="Camunda", type="technology_reference", confidence="high")
+    
+    # Add new entity types for visualization testing
+    sample_graph.add_node("db_entity::products_table", name="ProductsTable", type="db_entity", defined_in_dbcontext="MainContext")
+    sample_graph.add_node("db_property::products_table::product_id", name="ProductID", type="db_property", is_primary_key=True)
+    sample_graph.add_edge("db_entity::products_table", "db_property::products_table::product_id", type="has_property")
+
+    sample_graph.add_node("k8s_yaml_file::/deploy/app.yaml", name="app.yaml", type="k8s_yaml_file", path="/deploy/app.yaml")
+    sample_graph.add_node("k8s_deployment::prod::my-app-dep", name="my-app-dep", type="k8s_deployment", namespace="prod", kind="Deployment")
+    sample_graph.add_edge("k8s_yaml_file::/deploy/app.yaml", "k8s_deployment::prod::my-app-dep", type="defines_k8s_resource")
+
+    sample_graph.add_node("docker_image::myimage:latest", name="myimage:latest", type="docker_image", image_tag="latest")
+    sample_graph.add_edge("k8s_deployment::prod::my-app-dep", "docker_image::myimage:latest", type="uses_image")
 
     # Add edges with attributes
     sample_graph.add_edge("file::/app/service.py", "class::/app/service.py::MyService", type="defines_class")
     sample_graph.add_edge("class::/app/service.py::MyService", "method::/app/service.py::MyService::do_work", type="defines_method")
     sample_graph.add_edge("method::/app/service.py::MyService::do_work", "module::flask", type="calls", detail="jsonify")
     sample_graph.add_edge("file::/app/service.py", "tech::camunda", type="mentions_technology", context="import statement")
-    
-    logging.info("Sample graph created for testing.")
+
+    # Example data flow edge (if desired for visualization test)
+    # sample_graph.add_edge("method::/app/service.py::MyService::do_work", "module::another_module", type="potential_data_flow", intermediate_variable="result")
+
+    logging.info("Sample graph with new entity types created for testing.")
 
     # 2. Export the graph to JSON
     exported_json = export_graph_to_json(sample_graph)

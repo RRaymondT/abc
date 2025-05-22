@@ -3,6 +3,7 @@
 import networkx
 import logging
 import os # For path operations in example
+import re # For _extract_property_names_from_lambda
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -16,6 +17,60 @@ class KnowledgeGraph:
         self.graph = networkx.DiGraph()
         self.nodes = set() # To keep track of added node IDs
         logging.info("KnowledgeGraph initialized.")
+
+    def _extract_property_names_from_lambda(self, lambda_str: str) -> list[str]:
+        """
+        Extracts property names from a C# lambda string like "e => e.Id" or "e => new { e.Key1, e.Key2 }".
+        """
+        if not isinstance(lambda_str, str): # Guard against non-string input
+            logging.warning(f"Invalid input to _extract_property_names_from_lambda: expected string, got {type(lambda_str)}")
+            return []
+            
+        # Regex to find property names after "e." (or any variable name before dot)
+        # It looks for patterns like 'x.Property'
+        PROP_FROM_LAMBDA_REGEX = re.compile(r"\w+\.([\w]+)")
+        matches = PROP_FROM_LAMBDA_REGEX.findall(lambda_str)
+        return list(set(matches)) # Return unique property names
+
+    def _find_or_create_callable_node(self, file_path_context: str, callable_name_str: str) -> str:
+        """
+        Finds an existing node representing the callable, or creates a placeholder.
+        This is a simplified heuristic.
+        """
+        # Attempt to find function/method in the same file
+        # This requires knowing the structure of IDs (e.g., "function::filepath::func_name" or "method::filepath::class::method_name")
+        # We'll try common patterns.
+        
+        # Case 1: Simple function name in the same file context
+        # Assuming callable_name_str does not contain "::" or class context like "MyClass.method"
+        # This simple check might not be enough if callable_name_str is complex e.g. "module.func"
+        
+        # Simplified check: if it's a simple name, assume it's a function in the current file.
+        # This won't find methods or imported functions correctly without more context/parsing.
+        
+        # Let's try to find a function node
+        # (e.g., function::/path/to/file.py::my_func)
+        # or a method node (e.g., method::/path/to/file.py::ClassName::my_method)
+        # or a class constructor (e.g., class::/path/to/file.py::ClassName)
+        
+        # For a simple callable_name_str like "my_func", try to match it to a function in file_path_context
+        potential_func_node_id = self._generate_node_id("function", file_path_context, callable_name_str)
+        if potential_func_node_id in self.nodes:
+            return potential_func_node_id
+
+        # If callable_name_str is like "ClassName.method_name" or "self.method_name", it's more complex.
+        # This simplified version will mostly create placeholders for such calls.
+        # A more robust implementation would:
+        # - require class_name_context if "self." is used
+        # - parse "module.func" and look for module nodes then func nodes.
+        # - check for class constructor calls.
+
+        # If not found through simple heuristics, create a placeholder
+        node_id = self._generate_node_id(f"callable_external_or_unresolved::{callable_name_str}")
+        self.add_node(node_id, node_type="external_or_unresolved_callable", name=callable_name_str)
+        logging.debug(f"Created placeholder callable node: {node_id} for '{callable_name_str}' in context of {file_path_context}")
+        return node_id
+
 
     def _generate_node_id(self, *parts: str) -> str:
         """
@@ -157,10 +212,33 @@ class KnowledgeGraph:
                 self.add_node(method_node_id, node_type="method", **method_attrs)
                 self.add_edge(class_node_id, method_node_id, relationship_type="defines_method")
 
+                # Process general calls (already present)
                 for call_target_str in m_data.get('calls', []):
-                    target_node_id = self._generate_node_id("callable", call_target_str)
+                    target_node_id = self._generate_node_id("callable", call_target_str) # Simplified, might need _find_or_create_callable_node logic
                     self.add_node(target_node_id, node_type="callable_entity", name=call_target_str, inferred=True)
                     self.add_edge(method_node_id, target_node_id, relationship_type="calls")
+                
+                # Process data flow links for methods
+                if m_data.get('data_flow_links'):
+                    for flow_link in m_data['data_flow_links']:
+                        source_func_str = flow_link['source_function']
+                        target_func_str = flow_link['target_function']
+                        intermediate_var = flow_link['intermediate_variable']
+                        
+                        # Use file_path as context for resolving these callable names
+                        source_callable_node_id = self._find_or_create_callable_node(file_path, source_func_str)
+                        target_callable_node_id = self._find_or_create_callable_node(file_path, target_func_str)
+                        
+                        edge_attrs = {
+                            "flow_through_function_name": method_name, # Name of the method containing this flow
+                            "flow_through_function_id": method_node_id,
+                            "intermediate_variable": intermediate_var,
+                            "arg_index": flow_link.get("arg_index"),
+                            "keyword_arg_name": flow_link.get("keyword_arg_name")
+                        }
+                        edge_attrs = {k: v for k, v in edge_attrs.items() if v is not None} # Clean None values
+                        self.add_edge(source_callable_node_id, target_callable_node_id, 
+                                      relationship_type="potential_data_flow", **edge_attrs)
 
         # Process functions
         for func_data in parsed_data.get('functions', []):
@@ -176,10 +254,32 @@ class KnowledgeGraph:
             self.add_node(func_node_id, node_type="function", **func_attrs)
             self.add_edge(file_node_id, func_node_id, relationship_type="defines_function")
 
+            # Process general calls (already present)
             for call_target_str in func_data.get('calls', []):
-                target_node_id = self._generate_node_id("callable", call_target_str)
+                target_node_id = self._generate_node_id("callable", call_target_str) # Simplified
                 self.add_node(target_node_id, node_type="callable_entity", name=call_target_str, inferred=True)
                 self.add_edge(func_node_id, target_node_id, relationship_type="calls")
+
+            # Process data flow links for functions
+            if func_data.get('data_flow_links'):
+                for flow_link in func_data['data_flow_links']:
+                    source_func_str = flow_link['source_function']
+                    target_func_str = flow_link['target_function']
+                    intermediate_var = flow_link['intermediate_variable']
+
+                    source_callable_node_id = self._find_or_create_callable_node(file_path, source_func_str)
+                    target_callable_node_id = self._find_or_create_callable_node(file_path, target_func_str)
+
+                    edge_attrs = {
+                        "flow_through_function_name": func_name, # Name of the function containing this flow
+                        "flow_through_function_id": func_node_id,
+                        "intermediate_variable": intermediate_var,
+                        "arg_index": flow_link.get("arg_index"),
+                        "keyword_arg_name": flow_link.get("keyword_arg_name")
+                    }
+                    edge_attrs = {k: v for k, v in edge_attrs.items() if v is not None}
+                    self.add_edge(source_callable_node_id, target_callable_node_id, 
+                                  relationship_type="potential_data_flow", **edge_attrs)
 
     def process_bpmn_parsed_data(self, parsed_data: dict, file_path: str):
         """
@@ -418,6 +518,139 @@ class KnowledgeGraph:
                 prop_attrs = {k:v for k,v in prop_attrs.items() if v is not None}
                 self.add_node(prop_node_id, node_type="csharp_property", **prop_attrs)
                 self.add_edge(entity_node_id, prop_node_id, relationship_type="defines_property")
+            
+            # After processing the class/interface and its members, check if it's a DbContext
+            if not is_interface and entity_data.get('is_dbcontext'):
+                self.process_ef_dbcontext_data(entity_data, file_path_for_id_gen)
+
+
+    def process_ef_dbcontext_data(self, ef_class_data: dict, file_path_for_id_gen: str):
+        """
+        Processes Entity Framework DbContext specific data (DbSets, OnModelCreating configurations)
+        for a given C# class.
+
+        Args:
+            ef_class_data: The dictionary for the C# class identified as a DbContext.
+                           This data comes from the C# parser.
+            file_path_for_id_gen: The original file path string for consistent ID generation.
+        """
+        dbcontext_name = ef_class_data['name']
+        # The DbContext node itself (csharp_class) is already created by _process_csharp_entities.
+        # We need its ID to link DbSets and configurations.
+        # The ID for the DbContext class node was: self._generate_node_id("csharp_class", file_path_for_id_gen, dbcontext_name)
+        dbcontext_node_id = self._generate_node_id("csharp_class", file_path_for_id_gen, dbcontext_name)
+
+        logging.info(f"Processing EF DbContext data for: {dbcontext_name} (Node ID: {dbcontext_node_id})")
+
+        # Process DbSet<T> properties
+        for db_set in ef_class_data.get('db_sets', []):
+            entity_name = db_set.get('entity_name')
+            if not entity_name:
+                logging.warning(f"DbSet in {dbcontext_name} missing entity_name: {db_set}")
+                continue
+            
+            # Node ID for the DB entity type (e.g., "Customer", "Order")
+            # Prefix with "db_entity::" to distinguish from potential C# class nodes with same name
+            entity_node_id = self._generate_node_id(f"db_entity::{entity_name}")
+            
+            self.add_node(entity_node_id, node_type="db_entity", name=entity_name, 
+                          defined_in_dbcontext=dbcontext_name,
+                          source_file=file_path_for_id_gen)
+            self.add_edge(dbcontext_node_id, entity_node_id, 
+                          relationship_type="defines_db_entity_set", 
+                          set_name=db_set.get('property_name', 'UnknownSet'))
+            logging.debug(f"Added DbSet '{db_set.get('property_name')}' for entity '{entity_name}' in {dbcontext_name}")
+
+        # Process ef_configurations from OnModelCreating
+        for config in ef_class_data.get('ef_configurations', []):
+            configured_entity_name = config.get('entity_configured')
+            if not configured_entity_name:
+                logging.warning(f"EF configuration in {dbcontext_name} missing 'entity_configured': {config}")
+                continue
+
+            # Ensure the db_entity node exists (it might have been created from a DbSet or another config)
+            entity_node_id = self._generate_node_id(f"db_entity::{configured_entity_name}")
+            self.add_node(entity_node_id, node_type="db_entity", name=configured_entity_name,
+                          defined_in_dbcontext=dbcontext_name,
+                          source_file=file_path_for_id_gen) # Add or update node
+
+            call_type = config.get('call_type')
+            details = config.get('details', {})
+
+            if call_type == 'HasKey':
+                # Details for HasKey directly contains the lambda string or parsed keys
+                key_lambda_str = details.get('key_expression', '') # From parser
+                prop_names = details.get('keys_found', []) # From parser
+                
+                if not prop_names and key_lambda_str: # Fallback if parser only gave expression
+                    prop_names = self._extract_property_names_from_lambda(key_lambda_str)
+
+                for prop_name in prop_names:
+                    # ID for the property of the DB entity
+                    prop_node_id = self._generate_node_id(entity_node_id, "property", prop_name)
+                    self.add_node(prop_node_id, node_type="db_property", name=prop_name, 
+                                  is_primary_key=True, entity_name=configured_entity_name)
+                    self.add_edge(entity_node_id, prop_node_id, relationship_type="has_primary_key_property")
+                    logging.debug(f"Configured PK: {configured_entity_name}.{prop_name}")
+
+            elif call_type == 'Property':
+                prop_name = details.get('property_name')
+                if not prop_name:
+                    logging.warning(f"EF 'Property' config in {dbcontext_name} for entity {configured_entity_name} missing 'property_name': {details}")
+                    continue
+                
+                prop_node_id = self._generate_node_id(entity_node_id, "property", prop_name)
+                prop_attrs = {k:v for k,v in details.items()} # Copy all details from parser
+                prop_attrs['name'] = prop_name # Ensure name is set
+                prop_attrs['entity_name'] = configured_entity_name
+                self.add_node(prop_node_id, node_type="db_property", **prop_attrs)
+                self.add_edge(entity_node_id, prop_node_id, relationship_type="has_property_configured")
+                logging.debug(f"Configured Property: {configured_entity_name}.{prop_name} with details {details}")
+
+            elif call_type in ["HasMany_WithOne", "HasOne_WithMany", "HasOne_WithOne"]:
+                # Details for relationships should contain target entity and navigation properties
+                # The parser provides 'many_arg', 'one_arg', 'nav_prop' etc.
+                # We need to determine the 'target_entity' based on these.
+                # For HasMany_WithOne: current_entity_type (source) HasMany target_entity_type_arg (target)
+                #                      target_navigation is on the target_entity_type_arg side.
+                # For HasOne_WithMany: current_entity_type (source) HasOne target_entity_type_arg (target)
+                #                      target_navigation is on the target_entity_type_arg side.
+                # For HasOne_WithOne:  current_entity_type (source) HasOne target_entity_type_arg (target)
+                
+                # Simplified: determine target entity from 'details' if parser provides a clear key like 'target_entity_type_arg' or similar
+                # The C# parser's _parse_ef_onmodelcreating_body provides 'many_arg', 'one_arg', 'nav_prop1', 'nav_prop2'
+                # 'many_arg' or 'one_arg' (or 'one_arg1'/'one_arg2') can be the type of the target entity.
+                # 'nav_propX' are names of navigation properties.
+                
+                target_entity_name = None
+                if call_type == "HasMany_WithOne" and details.get("one_arg"): target_entity_name = details.get("one_arg")
+                elif call_type == "HasOne_WithMany" and details.get("many_arg"): target_entity_name = details.get("many_arg")
+                elif call_type == "HasOne_WithOne" and details.get("one_arg2"): # Assuming one_arg2 is the target type in HasOne().WithOne(target => target.Nav)
+                    target_entity_name = details.get("one_arg2") 
+                elif details.get("target_entity"): # Generic fallback if parser uses this key
+                    target_entity_name = details.get("target_entity")
+
+
+                if not target_entity_name:
+                    logging.warning(f"EF '{call_type}' config in {dbcontext_name} for {configured_entity_name} "
+                                    f"could not determine target_entity from details: {details}")
+                    continue
+                
+                target_entity_node_id = self._generate_node_id(f"db_entity::{target_entity_name}")
+                self.add_node(target_entity_node_id, node_type="db_entity", name=target_entity_name,
+                              defined_in_dbcontext=dbcontext_name, # May or may not be true, but context is this DbContext
+                              source_file=file_path_for_id_gen, inferred=True) # Inferred as it might not be a DbSet itself
+
+                edge_attrs = {k:v for k,v in details.items() if k not in ['target_entity', 'many_arg', 'one_arg', 'one_arg1', 'one_arg2']} # Exclude args used to find target
+                edge_attrs['description'] = details.get('description', call_type) # Use specific description if parser provided it
+                
+                self.add_edge(entity_node_id, target_entity_node_id, 
+                              relationship_type=call_type.lower().replace("_", "_to_"), # e.g. hasmany_to_withone
+                              **edge_attrs)
+                logging.debug(f"Configured Relationship: {configured_entity_name} {call_type} {target_entity_name}")
+            else:
+                logging.warning(f"Unknown EF configuration call_type '{call_type}' in {dbcontext_name} for entity {configured_entity_name}.")
+
 
     def process_vue_parsed_data(self, parsed_data: dict, file_path: str):
         """
@@ -509,6 +742,75 @@ class KnowledgeGraph:
                     self.add_node(inferred_handler_id, node_type="vue_event_handler_expression", name=handler_name, event_name=event_name, component_name=comp_name, file_path=file_path)
                     self.add_edge(comp_node_id, inferred_handler_id, relationship_type=f"handles_event_{event_name.replace('.', '_')}")
                     logging.debug(f"Vue component {comp_name} event '{event_name}' handler '{handler_name}' does not directly map to a parsed method. Created expression node.")
+
+    def process_k8s_yaml_data(self, k8s_resource_list: list, file_path: str):
+        """
+        Processes parsed Kubernetes YAML data and adds corresponding nodes and edges to the graph.
+
+        Args:
+            k8s_resource_list: A list of dictionaries, where each dictionary represents a parsed K8s resource.
+            file_path: The path of the original K8s YAML file.
+        """
+        if not k8s_resource_list:
+            logging.info(f"No Kubernetes resources provided for file: {file_path}")
+            return
+
+        yaml_file_node_id = self._generate_node_id("k8s_yaml_file", file_path) # Use specific prefix for k8s file nodes
+        self.add_node(yaml_file_node_id, node_type="k8s_yaml_file", path=file_path, name=os.path.basename(file_path))
+        logging.debug(f"Processing K8s YAML file node: {yaml_file_node_id}")
+
+        for resource_data in k8s_resource_list:
+            kind = resource_data.get('kind', 'UnknownKind')
+            name = resource_data.get('name', 'Unnamed')
+            namespace = resource_data.get('namespace', 'default') # K8s default namespace
+
+            # Node ID for K8s resource: file_path + kind + namespace + name
+            # This aims to make it unique for resources defined in different files or with same name in different namespaces.
+            # For multi-doc YAMLs where file_path, kind, ns, name might still collide (e.g. multiple unnamed resources of same kind),
+            # the parser should ideally provide a unique identifier or index from the document.
+            # For now, this is a reasonable approach.
+            resource_node_id = self._generate_node_id("k8s_resource", file_path, kind, namespace, name)
+
+            # Prepare attributes for the node, excluding 'file_path' as it's on the file node.
+            node_attrs = {k: v for k, v in resource_data.items() if k != 'file_path'}
+            node_attrs['name'] = name # Ensure 'name' is set for display consistency.
+            
+            # Use a standardized k8s_ type prefix for graph consistency
+            node_type_str = f"k8s_{kind.lower().replace('-', '_')}"
+            self.add_node(resource_node_id, node_type=node_type_str, **node_attrs)
+            self.add_edge(yaml_file_node_id, resource_node_id, relationship_type="defines_k8s_resource")
+            logging.debug(f"Added K8s resource node: {resource_node_id} (Type: {node_type_str})")
+
+            # Process Containers if present
+            if 'containers' in resource_data and resource_data['containers'] is not None:
+                for container in resource_data['containers']:
+                    if not isinstance(container, dict): # Ensure container is a dict
+                        logging.warning(f"Skipping malformed container data for K8s resource {resource_node_id}: {container}")
+                        continue
+
+                    image_name = container.get('image')
+                    if image_name:
+                        # Global ID for images to ensure they are the same node if used by multiple deployments
+                        image_node_id = self._generate_node_id(f"docker_image::{image_name}")
+                        
+                        image_tag = 'latest' # Default tag
+                        if ':' in image_name and not image_name.endswith(':'):
+                            try_tag = image_name.split(':')[-1]
+                            # Basic check: avoid parts of path like 'myregistry.com/path' being mistaken for tag
+                            if '/' not in try_tag: 
+                                image_tag = try_tag
+                        
+                        self.add_node(image_node_id, node_type="docker_image", name=image_name, image_tag=image_tag)
+                        self.add_edge(resource_node_id, image_node_id, 
+                                      relationship_type="uses_image", 
+                                      container_name=container.get('name', 'UnnamedContainer'))
+                        logging.debug(f"K8s resource {resource_node_id} uses image {image_name} (Tag: {image_tag})")
+            
+            # Service Selector processing (placeholder for future enhancement)
+            if 'selector' in resource_data and resource_data['selector'] is not None:
+                # The selector (a dict) is already stored as an attribute on the service node by **node_attrs.
+                # Future: self.link_k8s_service_selector(resource_node_id, resource_data['selector'], namespace)
+                logging.debug(f"K8s service {resource_node_id} has selector: {resource_data['selector']}")
 
 
     def process_tech_scan_data(self, tech_scan_results: dict, codebase_path: str):
@@ -635,9 +937,47 @@ if __name__ == '__main__':
         "imports": ["flask"],
         "classes": [{
             "name": "UserService", "base_classes": [], "decorators": ["@app.route('/users')"],
-            "methods": [{"name": "get_user", "parameters": ["self", "id"], "calls": ["flask.jsonify"], "decorators": ["@app.route('/<id>')"]}]
+            "methods": [{
+                "name": "get_user", "parameters": ["self", "id"], "calls": ["flask.jsonify"], 
+                "decorators": ["@app.route('/<id>')"],
+                "data_flow_links": [] # Assume no specific data flow for this simple method for now
+            }]
         }],
-        "functions": [{"name": "process_data", "parameters": [], "calls": ["print"], "decorators": ["@background_task"]}]
+        "functions": [{
+            "name": "process_data", "parameters": [], "calls": ["print"], "decorators": ["@background_task"],
+            "data_flow_links": [] 
+            },
+            { # Adding functions for data flow example
+            "name": "source_data_func", "parameters": [], "calls": [], "decorators": [],
+            "data_flow_links": []
+            },
+            {
+            "name": "process_data_func", "parameters": ["input_arg"], "calls": ["final_sink_func"], "decorators": [],
+            "data_flow_links": [{ # Data flows from 'another_intermediate_func' into 'process_data_func'
+                "source_function": "another_intermediate_func",
+                "intermediate_variable": "temp_var_for_process",
+                "target_function": "process_data_func", # Self, if data is processed within
+                "arg_index": 0 
+            }]
+            },
+            { # A function that is called by process_data_func
+            "name": "final_sink_func", "parameters": ["final_data"], "calls": [], "decorators": [],
+            "data_flow_links": []
+            },
+            { # Another function that acts as a source in a data flow link
+            "name": "another_intermediate_func", "parameters": [], "calls": [], "decorators": [],
+            "data_flow_links": []
+            },
+             { # Top-level function that orchestrates a data flow
+            "name": "orchestrator_func", "parameters": [], "calls": ["source_data_func", "process_data_func"], "decorators": [],
+            "data_flow_links": [{
+                "source_function": "source_data_func",
+                "intermediate_variable": "temp_data",
+                "target_function": "process_data_func",
+                "arg_index": 0 # temp_data is passed as first argument to process_data_func
+            }]
+            }
+        ]
     }
 
     # For BPMN file (order_process.bpmn)
@@ -650,21 +990,84 @@ if __name__ == '__main__':
     # Mock C# Parsed Data
     dummy_cs_path = os.path.join(mock_codebase_path, "services", "ProductService.cs")
     os.makedirs(os.path.join(mock_codebase_path, "services"), exist_ok=True)
-    with open(dummy_cs_path, "w") as f: f.write("// C# Product Service") # Dummy content
-    
+    # with open(dummy_cs_path, "w") as f: f.write("// C# Product Service") # Dummy content
+    # Use the EF example code for mock_csharp_parsed
+    EXAMPLE_CSHARP_EF_CODE = """
+using System;
+using Microsoft.EntityFrameworkCore;
+
+namespace MyWebApp.Data
+{
+    public class Product { public int ProductId { get; set; } public string Name { get; set; } public int CategoryId {get;set;} public Category Category {get;set;} }
+    public class Category { public int CategoryId { get; set; } public string CategoryName { get; set; } public List<Product> Products {get;set;} }
+
+    public class AppDbContext : DbContext
+    {
+        public DbSet<Product> Products { get; set; }
+        public DbSet<Category> Categories { get; set; }
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<Product>()
+                .HasKey(p => p.ProductId);
+            modelBuilder.Entity<Product>()
+                .Property(p => p.Name)
+                .IsRequired()
+                .HasMaxLength(100);
+            modelBuilder.Entity<Category>()
+                .HasMany(c => c.Products)
+                .WithOne(p => p.Category)
+                .HasForeignKey(p => p.CategoryId);
+        }
+    }
+}
+"""
+    with open(dummy_cs_path, "w") as f: f.write(EXAMPLE_CSHARP_EF_CODE)
+
+
+    # This mock data should align with the output of your C# parser for the EF example
     mock_csharp_parsed = {
         "file_path": dummy_cs_path,
-        "usings": ["System", "System.Collections.Generic", "MyWebApp.Models"],
+        "usings": ["System", "Microsoft.EntityFrameworkCore"],
         "namespaces": [{
-            "name": "MyWebApp.Services",
-            "classes": [{
-                "name": "ProductService", "namespace": "MyWebApp.Services", "attributes": ["ServiceLifetime(Singleton)"], "base_types_str": "IProductService",
-                "methods": [{"name": "GetProductById", "return_type": "Product", "parameters_str": "int productId", "attributes": []}],
-                "properties": [{"name": "DefaultRetryAttempts", "type": "int", "attributes": []}]
-            }],
+            "name": "MyWebApp.Data",
+            "classes": [
+                {"name": "Product", "namespace": "MyWebApp.Data", "methods": [], "properties": [{"name": "ProductId", "type": "int"}, {"name": "Name", "type": "string"}, {"name":"CategoryId", "type":"int"}, {"name":"Category", "type":"Category"}]},
+                {"name": "Category", "namespace": "MyWebApp.Data", "methods": [], "properties": [{"name": "CategoryId", "type": "int"}, {"name": "CategoryName", "type": "string"}, {"name": "Products", "type": "List<Product>"}]},
+                {
+                    "name": "AppDbContext", "namespace": "MyWebApp.Data", "base_types_str": "DbContext", 
+                    "is_dbcontext": True,
+                    "db_sets": [
+                        {'entity_name': 'Product', 'property_name': 'Products'},
+                        {'entity_name': 'Category', 'property_name': 'Categories'}
+                    ],
+                    "methods": [
+                        {"name": "OnModelCreating", "parameters_str": "ModelBuilder modelBuilder", "return_type": "void"}
+                    ],
+                    "properties": [ # DbSets are properties, ensure they are also listed here by the parser if that's its behavior
+                        {"name": "Products", "type": "DbSet<Product>"},
+                        {"name": "Categories", "type": "DbSet<Category>"}
+                    ],
+                    "ef_configurations": [
+                        {'entity_configured': 'Product', 'call_type': 'HasKey', 'details': {'key_expression': 'p => p.ProductId', 'keys_found': ['ProductId']}},
+                        {'entity_configured': 'Product', 'call_type': 'Property', 'details': {'property_name': 'Name', 'is_required': True, 'max_length': 100}},
+                        {'entity_configured': 'Category', 'call_type': 'HasMany_WithOne', 'details': {
+                            'many_arg': None, # Assuming parser might not get generic from HasMany itself
+                            'one_arg': None,  # Assuming parser might not get generic from WithOne itself
+                            'nav_prop': 'Category', # This detail from parser might be tricky, adjust based on actual parser output
+                                                    # The prompt example for graph_builder has 'target_entity', 'source_navigation', 'target_navigation'
+                                                    # Let's try to match that structure for test.
+                            'target_entity': 'Product', # Inferred from WithOne(p => p.Category) and Products collection
+                            'source_navigation': 'Products', # c.Products
+                            'target_navigation': 'Category', # p.Category
+                            'foreign_key': 'CategoryId'  # p.CategoryId
+                        }}
+                    ]
+                }
+            ],
             "interfaces": []
         }],
-        "classes": [], "interfaces": [] # No global classes/interfaces in this example
+        "classes": [], "interfaces": []
     }
 
     # Mock Vue.js Parsed Data
@@ -698,45 +1101,122 @@ if __name__ == '__main__':
     # kg.load_graph_from_directory(mock_codebase_path, mock_tech_scan_results, mock_all_parsed_data)
     # Instead of load_graph_from_directory, call process_parsed_file_data directly for testing new parsers
     logging.info("Testing individual file processors:")
-    kg.process_parsed_file_data(mock_python_parsed)
-    kg.process_parsed_file_data(mock_csharp_parsed)
-    kg.process_parsed_file_data(mock_vue_parsed)
-    # Tech scan data can be loaded if needed for full context, but not essential for unit testing new parsers
+    if mock_python_parsed: kg.process_parsed_file_data(mock_python_parsed)
+    if mock_csharp_parsed: kg.process_parsed_file_data(mock_csharp_parsed)
+    if mock_vue_parsed: kg.process_parsed_file_data(mock_vue_parsed)
+
+    # --- Test K8s YAML Data Processing ---
+    mock_k8s_file_path = "/fake/kube.yaml"
+    mock_k8s_parsed_data = [
+        {'file_path': mock_k8s_file_path, 'kind': 'Deployment', 'name': 'my-app', 'namespace': 'prod', 
+         'labels': {'app': 'my-app'}, 
+         'containers': [
+             {'name': 'main', 'image': 'myimage:1.2.3', 'ports': [{'containerPort': 80}]},
+             {'name': 'sidecar', 'image': 'myotherimage/side:latest', 'ports': []}, # Test with 'latest' tag
+             {'name': 'no-tag-image', 'image': 'busybox', 'ports': []} # Test with no tag
+         ]},
+        {'file_path': mock_k8s_file_path, 'kind': 'Service', 'name': 'my-service', 'namespace': 'prod', 
+         'selector': {'app': 'my-app'}, 
+         'ports': [{'port': 8080, 'targetPort': 80}]}
+    ]
+    logging.info("Testing K8s YAML data processor:")
+    kg.process_k8s_yaml_data(mock_k8s_parsed_data, mock_k8s_file_path)
+    # Tech scan data can be loaded if needed for full context
     # kg.process_tech_scan_data(mock_tech_scan_results, mock_codebase_path)
 
 
     # --- Print Graph Info ---
     graph = kg.get_graph()
-    print(f"\n--- Knowledge Graph Built (Partial - Manual Calls) ---")
+    print(f"\n--- Knowledge Graph Built (Partial - Manual Calls with K8s) ---")
     print(f"Number of nodes: {graph.number_of_nodes()}")
     print(f"Number of edges: {graph.number_of_edges()}")
 
     print("\nNodes (selected examples with new attributes):")
     # Python method with decorators
-    py_method_id = kg._generate_node_id("method", dummy_py_path, "UserService", "get_user")
-    if py_method_id in graph:
-        print(f"  Python Method: {py_method_id}, Attrs: {graph.nodes[py_method_id]}")
+    py_method_id_test = kg._generate_node_id("method", dummy_py_path, "UserService", "get_user")
+    if py_method_id_test in graph: print(f"  Python Method: {py_method_id_test}, Attrs: {graph.nodes[py_method_id_test]}")
+
+    # Test data flow edge
+    source_node_for_flow = kg._find_or_create_callable_node(dummy_py_path, "source_data_func")
+    target_node_for_flow = kg._find_or_create_callable_node(dummy_py_path, "process_data_func")
     
-    # C# class
-    cs_class_id = kg._generate_node_id("csharp_class", dummy_cs_path, "ProductService")
-    if cs_class_id in graph:
-        print(f"  C# Class: {cs_class_id}, Attrs: {graph.nodes[cs_class_id]}")
+    edge_exists = graph.has_edge(source_node_for_flow, target_node_for_flow)
+    print(f"  Data flow edge from '{source_node_for_flow}' to '{target_node_for_flow}' exists: {edge_exists}")
+    if edge_exists:
+        # For DiGraph, edge data is stored in a dictionary keyed by an integer (usually 0 for the first edge)
+        # or by a user-defined key if specified during add_edge.
+        # If multiple edges can exist, graph.get_edge_data returns a dict of dicts.
+        edge_data_dict = graph.get_edge_data(source_node_for_flow, target_node_for_flow)
+        # Assuming only one edge for this test case or we are interested in the first one (key 0)
+        # Or, if relationship_type was used as a key in a MultiDiGraph
+        # For now, let's assume it's a simple DiGraph or the first edge.
+        actual_edge_data = None
+        if edge_data_dict:
+            # Try to get the first edge's data; typically key 0 for simple graphs
+            # or if multiple edges, find the one with 'potential_data_flow'
+            for key, data in edge_data_dict.items():
+                if data.get('type') == 'potential_data_flow': # Graph builder adds 'type' as relationship_type
+                    actual_edge_data = data
+                    break
+                elif key == 0 and not actual_edge_data : # Fallback for simple DiGraph if type not set as key
+                    actual_edge_data = data
 
-    # Vue component
-    vue_comp_primary_id = kg._generate_node_id("vue_component", dummy_vue_path, "LoginComponent")
-    if vue_comp_primary_id in graph:
-         print(f"  Vue Component (Primary): {vue_comp_primary_id}, Attrs: {graph.nodes[vue_comp_primary_id]}")
+
+        if actual_edge_data:
+            print(f"    Edge attributes: {actual_edge_data}")
+            assert actual_edge_data.get("flow_through_function_name") == "orchestrator_func"
+            assert actual_edge_data.get("intermediate_variable") == "temp_data"
+        else:
+            print(f"    Could not retrieve specific edge data for data flow link between {source_node_for_flow} and {target_node_for_flow}")
+
     
-    # Vue prop (example)
-    vue_prop_id = kg._generate_node_id("vue_prop", dummy_vue_path, "LoginComponent", "initialUsername")
-    if vue_prop_id in graph:
-        print(f"  Vue Prop: {vue_prop_id}, Attrs: {graph.nodes[vue_prop_id]}")
+    # C# DbContext class
+    cs_dbcontext_id = kg._generate_node_id("csharp_class", dummy_cs_path, "AppDbContext")
+    if cs_dbcontext_id in graph: print(f"  C# DbContext: {cs_dbcontext_id}, Attrs: {graph.nodes[cs_dbcontext_id]}")
 
+    # K8s File node
+    k8s_file_node = kg._generate_node_id("k8s_yaml_file", mock_k8s_file_path)
+    if k8s_file_node in graph: print(f"  K8s File: {k8s_file_node}, Attrs: {graph.nodes[k8s_file_node]}")
 
-    # Example of finding edges (e.g., Vue component uses BaseInput)
-    # base_input_id = kg._generate_node_id("vue_component", "BaseInput") # Name only for external/unresolved
-    # if graph.has_edge(vue_comp_primary_id, base_input_id):
-    #     print(f"  Edge found: {vue_comp_primary_id} --uses_component_in_template--> {base_input_id}")
+    # K8s Deployment node
+    k8s_deployment_node = kg._generate_node_id("k8s_resource", mock_k8s_file_path, "Deployment", "prod", "my-app")
+    if k8s_deployment_node in graph:
+        print(f"  K8s Deployment: {k8s_deployment_node}, Attrs: {graph.nodes[k8s_deployment_node]}")
+        assert graph.nodes[k8s_deployment_node]['kind'] == 'Deployment'
+        assert graph.nodes[k8s_deployment_node]['namespace'] == 'prod'
+        assert 'app' in graph.nodes[k8s_deployment_node]['labels']
+        assert len(graph.nodes[k8s_deployment_node]['containers']) == 3
+
+    # K8s Service node
+    k8s_service_node = kg._generate_node_id("k8s_resource", mock_k8s_file_path, "Service", "prod", "my-service")
+    if k8s_service_node in graph:
+        print(f"  K8s Service: {k8s_service_node}, Attrs: {graph.nodes[k8s_service_node]}")
+        assert graph.nodes[k8s_service_node]['selector']['app'] == 'my-app'
+
+    # Docker Image nodes
+    image_node1 = kg._generate_node_id("docker_image::myimage:1.2.3")
+    if image_node1 in graph:
+        print(f"  Docker Image 1: {image_node1}, Attrs: {graph.nodes[image_node1]}")
+        assert graph.nodes[image_node1]['image_tag'] == '1.2.3'
+        assert graph.has_edge(k8s_deployment_node, image_node1)
+        assert graph.edges[(k8s_deployment_node, image_node1, 0)]['container_name'] == 'main'
+        
+    image_node2 = kg._generate_node_id("docker_image::myotherimage/side:latest")
+    if image_node2 in graph:
+        print(f"  Docker Image 2: {image_node2}, Attrs: {graph.nodes[image_node2]}")
+        assert graph.nodes[image_node2]['image_tag'] == 'latest'
+        assert graph.has_edge(k8s_deployment_node, image_node2)
+
+    image_node3 = kg._generate_node_id("docker_image::busybox") # No tag
+    if image_node3 in graph:
+        print(f"  Docker Image 3 (no tag): {image_node3}, Attrs: {graph.nodes[image_node3]}")
+        assert graph.nodes[image_node3]['image_tag'] == 'latest' # Defaulted
+        assert graph.has_edge(k8s_deployment_node, image_node3)
+
+    # Check edge from file to resource
+    if graph.has_edge(k8s_file_node, k8s_deployment_node):
+        print(f"  Edge from K8s file to Deployment: {k8s_file_node} -> {k8s_deployment_node}")
+        assert graph.edges[(k8s_file_node, k8s_deployment_node, 0)]['type'] == 'defines_k8s_resource'
 
 
     # Clean up dummy files and directories
